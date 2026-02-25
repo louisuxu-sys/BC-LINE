@@ -370,7 +370,7 @@ def _derived_vote(road):
     return 0
 
 def baccarat_ai_logic(history_list, big_eye=None, small_r=None, cockroach=None):
-    """強化版百家AI邏輯：結合機率模型 + 牌路分析 + 衍生路 + EV計算"""
+    """強化版百家AI邏輯：結合機率模型 + 牌路分析 + 衍生路 + 期望值計算"""
     pure_history = [h for h in history_list if h in ["莊", "閒"]]
     if not pure_history:
         return {"下注": "等待數據", "勝率": 50, "建議注碼": "觀察", "模式": "數據不足",
@@ -418,10 +418,10 @@ def baccarat_ai_logic(history_list, big_eye=None, small_r=None, cockroach=None):
     # 維度A：EV (期望值) → 權重 30%
     if ev_b > ev_p:
         score_banker += 30
-        decision_factors.append(f"EV莊{ev_b:+.4f} > 閒{ev_p:+.4f}")
+        decision_factors.append(f"期望值莊{ev_b:+.4f} > 閒{ev_p:+.4f}")
     else:
         score_player += 30
-        decision_factors.append(f"EV閒{ev_p:+.4f} > 莊{ev_b:+.4f}")
+        decision_factors.append(f"期望值閒{ev_p:+.4f} > 莊{ev_b:+.4f}")
 
     # 維度B：動態機率 → 權重 25%
     if prob_b > prob_p:
@@ -480,7 +480,7 @@ def baccarat_ai_logic(history_list, big_eye=None, small_r=None, cockroach=None):
         mode = "🐉 長龍模式"
         bet = "2單位"
     elif best_ev > 0.01:
-        mode = "✅ 正EV模式"
+        mode = "✅ 正期望值模式"
         bet = "2單位"
     elif patterns or derived_reasons:
         mode = "📈 好路模式"
@@ -496,7 +496,7 @@ def baccarat_ai_logic(history_list, big_eye=None, small_r=None, cockroach=None):
     reasons = []
     # 機率統計
     reasons.append(f"📊 機率：莊{prob_b*100:.1f}% / 閒{prob_p*100:.1f}% / 和{prob_t*100:.1f}%")
-    reasons.append(f"💰 EV：莊{ev_b:+.4f} / 閒{ev_p:+.4f}")
+    reasons.append(f"💰 期望值：莊{ev_b:+.4f} / 閒{ev_p:+.4f}")
     reasons.append(f"📈 精準度：{accuracy}% (已分析{total_hands}局)")
     reasons.append(f"🃏 牌靴進度：{shoe_progress*100:.0f}% (約剩{remaining_cards:.0f}張)")
     # 歷史統計
@@ -808,7 +808,7 @@ def build_analysis_flex(room, history, total_counts=None, profit_info=None, _out
         pred.append({"type": "separator", "margin": "xs", "color": "#DDDDDD"})
         pred.extend(profit_lines)
     if reason_text:
-        pred.append({"type": "text", "text": reason_text, "size": "xxs", "color": "#888888", "align": "center", "wrap": True, "margin": "xs"})
+        pred.append({"type": "text", "text": reason_text, "size": "xxs", "color": "#888888", "align": "start", "wrap": True, "margin": "xs"})
     hdr = {
         "type": "box", "layout": "vertical", "backgroundColor": "#1A5276", "paddingAll": "sm",
         "contents": [{"type": "text", "text": "新紀元百家 AI 分析", "color": "#ffffff", "weight": "bold", "size": "md", "align": "center"}]
