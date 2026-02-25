@@ -471,26 +471,55 @@ def baccarat_ai_logic(history_list, big_eye=None, small_r=None, cockroach=None):
     if suggest and confidence > 70:
         conf = max(conf, confidence)
 
-    # --- (7) 模式 & 注碼建議 ---
+    # --- (7) 模式 & 注碼建議 (1~10級) ---
     best_ev = max(ev_b, ev_p)
-    if streak >= 4 and best_ev > 0:
-        mode = "🔥 強勢長龍"
-        bet = "3單位(加注)"
+    score_diff = abs(score_banker - score_player)
+
+    # 基礎注碼：由信心度映射 (conf 55~92 → 注碼 1~6)
+    bet_units = max(1, min(6, round((conf - 55) / 6.5) + 1))
+
+    # 加分因子
+    if streak >= 5:
+        bet_units += 3
+    elif streak >= 4:
+        bet_units += 2
     elif streak >= 3:
-        mode = "🐉 長龍模式"
-        bet = "2單位"
-    elif best_ev > 0.01:
-        mode = "✅ 正期望值模式"
-        bet = "2單位"
-    elif patterns or derived_reasons:
-        mode = "📈 好路模式"
-        bet = "1單位"
-    elif best_ev > -0.005:
-        mode = "⚖️ 平衡模式"
-        bet = "1單位"
+        bet_units += 1
+    if best_ev > 0.02:
+        bet_units += 2
+    elif best_ev > 0.005:
+        bet_units += 1
+    if patterns and confidence and confidence >= 72:
+        bet_units += 1
+    if abs(derived_score) >= 2:
+        bet_units += 1
+
+    # 減分因子
+    if best_ev < -0.01:
+        bet_units -= 2
+    elif best_ev < -0.005:
+        bet_units -= 1
+    if score_diff <= 5:
+        bet_units -= 1
+    if total_hands < 5:
+        bet_units = min(bet_units, 3)
+
+    # 限制範圍 1~10
+    bet_units = max(1, min(10, bet_units))
+
+    bet = f"{bet_units}單位"
+
+    # 模式判定
+    if bet_units >= 8:
+        mode = "🔥 強勢出擊"
+    elif bet_units >= 6:
+        mode = "🐉 積極進攻"
+    elif bet_units >= 4:
+        mode = "✅ 穩健跟進"
+    elif bet_units >= 2:
+        mode = "📈 輕注試探"
     else:
-        mode = "☁️ 觀望模式"
-        bet = "0.5單位(縮注)"
+        mode = "☁️ 觀望為主"
 
     # --- (8) 組建理由文字 ---
     reasons = []
@@ -1188,13 +1217,11 @@ def webhook():
                         if last_pred:
                             bet_side = last_pred["下注"]
                             bet_text = last_pred.get("建議注碼", "1單位")
-                            multiplier = 1.0
-                            if "3單位" in bet_text:
-                                multiplier = 3.0
-                            elif "2單位" in bet_text:
-                                multiplier = 2.0
-                            elif "0.5單位" in bet_text:
-                                multiplier = 0.5
+                            # 動態解析注碼數字 (支援 1~10單位)
+                            try:
+                                multiplier = float(''.join(c for c in bet_text.split("單位")[0] if c.isdigit() or c == '.'))
+                            except:
+                                multiplier = 1.0
                             bet_amount = pt["unit"] * multiplier
                             pt["rounds"] += 1
                             if actual == "和":
