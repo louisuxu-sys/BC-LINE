@@ -697,6 +697,8 @@ def send_main_menu(tk):
     ]))
 
 def get_access_status(uid):
+    if uid in ADMIN_UIDS:
+        return "active", "永久"
     user = user_access_data.get(uid)
     if not user:
         return "none", ""
