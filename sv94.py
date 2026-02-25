@@ -926,6 +926,7 @@ def webhook():
 
     return jsonify({"status": "ok"})
 
+@app.route("/", methods=["GET"])
 @app.route("/health", methods=["GET"])
 def health():
     return jsonify({"status": "ok", "service": "sv94-bot"})
