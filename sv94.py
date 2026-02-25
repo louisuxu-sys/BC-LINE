@@ -774,11 +774,13 @@ def build_derived_road_ui(title, flat, style="hollow", max_display=40, use_dot=F
     return _section(title, _grid(truncated, max_rows, cell_fn, sz))
 
 # ==================== Flex 構建 ====================
-def build_analysis_flex(room, history, total_counts=None):
+def build_analysis_flex(room, history, total_counts=None, profit_info=None, _out_res=None):
     big_road_grid = compute_big_road(history)
     big_road_cols = compute_big_road_cols(history)
     big_eye, small_r, cockroach = compute_derived_roads(big_road_cols)
     res = baccarat_ai_logic(history, big_eye, small_r, cockroach)
+    if _out_res is not None:
+        _out_res.update(res)
     reason_text = res.get("理由", "")
     if total_counts:
         tb = total_counts.get('莊', 0)
@@ -795,18 +797,31 @@ def build_analysis_flex(room, history, total_counts=None):
         {"type": "text", "text": f"信心：{res['勝率']}%  |  注碼：{bet_text}", "size": "sm", "align": "center", "color": "#1E8449"},
         {"type": "text", "text": f"🧠 AI精準度：{accuracy}%  |  {stats}", "size": "xxs", "color": "#666666", "align": "center", "margin": "xs"}
     ]
+    if profit_info:
+        pi = profit_info
+        profit_color = "#1E8449" if pi["total_profit"] >= 0 else "#C0392B"
+        round_color = "#1E8449" if pi.get("round_profit", 0) >= 0 else "#C0392B"
+        profit_lines = []
+        if "round_text" in pi:
+            profit_lines.append({"type": "text", "text": pi["round_text"], "size": "xs", "color": round_color, "align": "center", "wrap": True})
+        profit_lines.append({"type": "text", "text": f"💰 累計損益：{pi['total_profit']:+,.0f}  |  勝率：{(pi['wins']/max(pi['wins']+pi['losses'],1)*100):.0f}% ({pi['wins']}W{pi['losses']}L)  |  共{pi['rounds']}局", "size": "xxs", "color": profit_color, "align": "center", "wrap": True})
+        pred.append({"type": "separator", "margin": "xs", "color": "#DDDDDD"})
+        pred.extend(profit_lines)
     if reason_text:
         pred.append({"type": "text", "text": reason_text, "size": "xxs", "color": "#888888", "align": "center", "wrap": True, "margin": "xs"})
     hdr = {
         "type": "box", "layout": "vertical", "backgroundColor": "#1A5276", "paddingAll": "sm",
         "contents": [{"type": "text", "text": "新紀元百家 AI 分析", "color": "#ffffff", "weight": "bold", "size": "md", "align": "center"}]
     }
+    footer_btns = [
+        {"type": "button", "action": {"type": "message", "label": "清除", "text": f"清除數據:{room}"}, "style": "secondary", "height": "sm"},
+        {"type": "button", "action": {"type": "message", "label": "返回", "text": "返回主選單"}, "style": "primary", "color": "#1A5276", "height": "sm"}
+    ]
+    if profit_info:
+        footer_btns.insert(1, {"type": "button", "action": {"type": "message", "label": "結算", "text": "結算"}, "style": "secondary", "height": "sm"})
     footer = {
         "type": "box", "layout": "horizontal", "spacing": "sm",
-        "contents": [
-            {"type": "button", "action": {"type": "message", "label": "清除", "text": f"清除數據:{room}"}, "style": "secondary", "height": "sm"},
-            {"type": "button", "action": {"type": "message", "label": "返回", "text": "返回主選單"}, "style": "primary", "color": "#1A5276", "height": "sm"}
-        ]
+        "contents": footer_btns
     }
     pred_box = {"type": "box", "layout": "vertical", "margin": "xs", "backgroundColor": "#FDF2E9", "paddingAll": "sm", "cornerRadius": "md", "contents": pred}
     info_line = {"type": "text", "text": f"房號：{room} | 模式：{res['模式']}", "size": "xxs", "color": "#888888"}
@@ -1060,21 +1075,10 @@ def webhook():
         # --- 計算獲利 ---
         if msg == "計算獲利":
             if status == "active":
-                chat_modes[uid] = {"state": "profit_input_bankroll"}
-                line_reply(tk, text_with_back("💰 計算獲利模式\n\n請輸入您的【目前本金】：\n(例如：10000)"))
+                chat_modes[uid] = {"state": "profit_input_unit"}
+                line_reply(tk, text_with_back("💰 計算獲利模式\n\n請輸入您的【1單位金額】：\n(例如：100)\n\n設定後請進入百家預測，系統會自動根據AI建議注碼幫您計算每局損益"))
             else:
                 line_reply(tk, sys_bubble("❌ 權限不足，請先儲值。"))
-            continue
-
-        elif isinstance(mode, dict) and mode.get("state") == "profit_input_bankroll":
-            try:
-                bankroll = float(msg)
-                if bankroll <= 0:
-                    raise ValueError
-                chat_modes[uid] = {"state": "profit_input_unit", "bankroll": bankroll}
-                line_reply(tk, text_with_back(f"✅ 本金：{bankroll:,.0f}\n\n請輸入您的【1單位金額】：\n(例如：100)\n\n系統會根據AI建議注碼自動計算"))
-            except:
-                line_reply(tk, sys_bubble("⚠️ 請輸入正確的數字金額"))
             continue
 
         elif isinstance(mode, dict) and mode.get("state") == "profit_input_unit":
@@ -1082,157 +1086,49 @@ def webhook():
                 unit = float(msg)
                 if unit <= 0:
                     raise ValueError
-                bankroll = mode["bankroll"]
                 profit_tracker[uid] = {
-                    "bankroll": bankroll, "unit": unit, "current": bankroll,
-                    "total_profit": 0, "rounds": 0, "wins": 0, "losses": 0,
-                    "history": []
+                    "unit": unit, "total_profit": 0, "rounds": 0,
+                    "wins": 0, "losses": 0, "last_prediction": None
                 }
-                chat_modes[uid] = {"state": "profit_playing"}
+                chat_modes.pop(uid, None)
                 line_reply(tk, sys_bubble(
                     f"✅ 獲利計算已啟動\n\n"
-                    f"💰 本金：{bankroll:,.0f}\n"
-                    f"🎯 1單位：{unit:,.0f}\n\n"
-                    f"請輸入每局開牌結果：\n"
-                    f"1 = 閒贏\n"
-                    f"2 = 莊贏\n"
-                    f"3 = 和局\n\n"
-                    f"輸入【結算】查看完整報表\n"
-                    f"輸入【返回主選單】結束",
+                    f"🎯 1單位金額：{unit:,.0f}\n\n"
+                    f"現在請點擊【百家預測】開始遊戲\n"
+                    f"每局開牌後系統會自動計算損益\n\n"
+                    f"輸入【結算】可查看完整報表\n"
+                    f"輸入【關閉獲利】停止計算",
                     [
-                        {"type": "action", "action": {"type": "message", "label": "1 閒贏", "text": "1"}},
-                        {"type": "action", "action": {"type": "message", "label": "2 莊贏", "text": "2"}},
-                        {"type": "action", "action": {"type": "message", "label": "3 和局", "text": "3"}},
-                        {"type": "action", "action": {"type": "message", "label": "結算", "text": "結算"}}
+                        {"type": "action", "action": {"type": "message", "label": "百家預測", "text": "百家預測"}},
+                        {"type": "action", "action": {"type": "message", "label": "↩ 返回主選單", "text": "返回主選單"}}
                     ]
                 ))
             except:
                 line_reply(tk, sys_bubble("⚠️ 請輸入正確的數字金額"))
             continue
 
-        elif isinstance(mode, dict) and mode.get("state") == "profit_playing":
-            pt = profit_tracker.get(uid)
-            if not pt:
-                chat_modes.pop(uid, None)
-                send_main_menu(tk)
-                continue
-
-            if msg == "結算":
-                # Show final report
-                h = pt["history"]
-                rpt = (
-                    f"📊 獲利結算報表\n"
-                    f"{'='*20}\n"
-                    f"💰 初始本金：{pt['bankroll']:,.0f}\n"
-                    f"💵 目前餘額：{pt['current']:,.0f}\n"
-                    f"{'='*20}\n"
-                    f"📈 總損益：{pt['total_profit']:+,.0f}\n"
-                    f"📊 報酬率：{(pt['total_profit']/pt['bankroll']*100):+.1f}%\n"
-                    f"{'='*20}\n"
-                    f"🎮 總局數：{pt['rounds']}\n"
-                    f"✅ 贏：{pt['wins']}局\n"
-                    f"❌ 輸：{pt['losses']}局\n"
-                    f"➖ 和：{pt['rounds'] - pt['wins'] - pt['losses']}局\n"
-                    f"📊 勝率：{(pt['wins']/max(pt['wins']+pt['losses'],1)*100):.1f}%\n"
-                )
-                if h:
-                    last5 = h[-5:]
-                    rpt += f"\n{'='*20}\n📝 最近{len(last5)}局：\n"
-                    for rec in last5:
-                        rpt += f"  {rec}\n"
-                profit_tracker.pop(uid, None)
-                chat_modes.pop(uid, None)
-                line_reply(tk, sys_bubble(rpt))
-                continue
-
-            code_map = {"1": "閒", "2": "莊", "3": "和"}
-            result = code_map.get(msg)
-            if not result:
-                line_reply(tk, sys_bubble("⚠️ 請輸入 1(閒贏) 2(莊贏) 3(和局)", [
-                    {"type": "action", "action": {"type": "message", "label": "1 閒贏", "text": "1"}},
-                    {"type": "action", "action": {"type": "message", "label": "2 莊贏", "text": "2"}},
-                    {"type": "action", "action": {"type": "message", "label": "3 和局", "text": "3"}},
-                    {"type": "action", "action": {"type": "message", "label": "結算", "text": "結算"}}
-                ]))
-                continue
-
-            # Get AI prediction for current history
-            ai_history = [rec.split("→")[0].strip() for rec in pt["history"] if "→" in rec]
-            # Build simple history from results so far
-            result_history = []
-            for rec in pt["history"]:
-                if "閒贏" in rec:
-                    result_history.append("閒")
-                elif "莊贏" in rec:
-                    result_history.append("莊")
-                elif "和局" in rec:
-                    result_history.append("和")
-            result_history.append(result)
-
-            # Determine what AI suggested this round (based on history BEFORE this result)
-            prev_history = result_history[:-1]
-            if prev_history:
-                ai_res = baccarat_ai_logic(prev_history)
-                bet_side = ai_res["下注"]
-                bet_text = ai_res.get("建議注碼", "1單位")
-            else:
-                bet_side = "莊"  # Default first round
-                bet_text = "1單位"
-
-            # Parse bet multiplier from bet_text
-            multiplier = 1.0
-            if "3單位" in bet_text:
-                multiplier = 3.0
-            elif "2單位" in bet_text:
-                multiplier = 2.0
-            elif "0.5單位" in bet_text:
-                multiplier = 0.5
-
-            bet_amount = pt["unit"] * multiplier
-            pt["rounds"] += 1
-
-            # Calculate profit/loss
-            if result == "和":
-                profit = 0
-                outcome = "➖ 和局(退注)"
-            elif result == bet_side:
-                # Win
-                if bet_side == "莊":
-                    profit = bet_amount * BANKER_PAYOUT
-                else:
-                    profit = bet_amount * PLAYER_PAYOUT
-                pt["wins"] += 1
-                outcome = f"✅ 贏 +{profit:,.0f}"
-            else:
-                # Lose
-                profit = -bet_amount
-                pt["losses"] += 1
-                outcome = f"❌ 輸 {profit:,.0f}"
-
-            pt["total_profit"] += profit
-            pt["current"] += profit
-            pt["history"].append(f"第{pt['rounds']}局：下注{bet_side}{bet_amount:,.0f} → {result}贏 → {outcome}")
-
-            # Show round result
-            reply_text = (
-                f"🎲 第 {pt['rounds']} 局結果\n"
-                f"{'─'*18}\n"
-                f"🤖 AI建議：{bet_side} ({bet_text})\n"
-                f"💵 下注額：{bet_amount:,.0f}\n"
-                f"🃏 開牌：{result}贏\n"
-                f"{'─'*18}\n"
-                f"{outcome}\n"
-                f"{'─'*18}\n"
-                f"💰 目前餘額：{pt['current']:,.0f}\n"
-                f"📈 累計損益：{pt['total_profit']:+,.0f}\n"
-                f"📊 勝率：{(pt['wins']/max(pt['wins']+pt['losses'],1)*100):.1f}% ({pt['wins']}勝{pt['losses']}負)"
+        if msg == "結算" and uid in profit_tracker:
+            pt = profit_tracker[uid]
+            rpt = (
+                f"📊 獲利結算報表\n"
+                f"{'='*20}\n"
+                f"🎯 單位金額：{pt['unit']:,.0f}\n"
+                f"{'='*20}\n"
+                f"📈 總損益：{pt['total_profit']:+,.0f}\n"
+                f"{'='*20}\n"
+                f"🎮 總局數：{pt['rounds']}\n"
+                f"✅ 贏：{pt['wins']}局\n"
+                f"❌ 輸：{pt['losses']}局\n"
+                f"➖ 和：{pt['rounds'] - pt['wins'] - pt['losses']}局\n"
+                f"📊 勝率：{(pt['wins']/max(pt['wins']+pt['losses'],1)*100):.1f}%\n"
             )
-            line_reply(tk, sys_bubble(reply_text, [
-                {"type": "action", "action": {"type": "message", "label": "1 閒贏", "text": "1"}},
-                {"type": "action", "action": {"type": "message", "label": "2 莊贏", "text": "2"}},
-                {"type": "action", "action": {"type": "message", "label": "3 和局", "text": "3"}},
-                {"type": "action", "action": {"type": "message", "label": "結算", "text": "結算"}}
-            ]))
+            profit_tracker.pop(uid, None)
+            line_reply(tk, sys_bubble(rpt))
+            continue
+
+        if msg == "關閉獲利" and uid in profit_tracker:
+            profit_tracker.pop(uid, None)
+            line_reply(tk, sys_bubble("✅ 獲利計算已關閉"))
             continue
 
         # --- 百家預測 ---
@@ -1283,6 +1179,42 @@ def webhook():
             new_data = [code_map[c] for c in msg if c in code_map]
             print(f"[DEBUG] predicting: msg={msg}, new_data={new_data}, history_len={len(history)}")
             if new_data:
+                # --- 獲利計算：用上一輪AI預測 vs 本輪實際結果 ---
+                profit_info = None
+                pt = profit_tracker.get(uid)
+                if pt:
+                    for actual in new_data:
+                        last_pred = pt.get("last_prediction")
+                        if last_pred:
+                            bet_side = last_pred["下注"]
+                            bet_text = last_pred.get("建議注碼", "1單位")
+                            multiplier = 1.0
+                            if "3單位" in bet_text:
+                                multiplier = 3.0
+                            elif "2單位" in bet_text:
+                                multiplier = 2.0
+                            elif "0.5單位" in bet_text:
+                                multiplier = 0.5
+                            bet_amount = pt["unit"] * multiplier
+                            pt["rounds"] += 1
+                            if actual == "和":
+                                profit = 0
+                                round_text = f"第{pt['rounds']}局：AI下{bet_side} {bet_amount:,.0f} → 開{actual} ➖ 和局(退注)"
+                            elif actual == bet_side:
+                                if bet_side == "莊":
+                                    profit = bet_amount * BANKER_PAYOUT
+                                else:
+                                    profit = bet_amount * PLAYER_PAYOUT
+                                pt["wins"] += 1
+                                round_text = f"第{pt['rounds']}局：AI下{bet_side} {bet_amount:,.0f} → 開{actual} ✅ +{profit:,.0f}"
+                            else:
+                                profit = -bet_amount
+                                pt["losses"] += 1
+                                round_text = f"第{pt['rounds']}局：AI下{bet_side} {bet_amount:,.0f} → 開{actual} ❌ {profit:,.0f}"
+                            pt["total_profit"] += profit
+                            pt["round_text"] = round_text
+                            pt["round_profit"] = profit
+
                 history.extend(new_data)
                 # Track total count before trimming
                 total_key = f"{room}_total"
@@ -1293,10 +1225,27 @@ def webhook():
                 if len(history) > 90:
                     history = history[-90:]
                 baccarat_history_dict[uid][room] = history
+
+                # Build profit_info for display
+                if pt:
+                    profit_info = {
+                        "total_profit": pt["total_profit"],
+                        "rounds": pt["rounds"],
+                        "wins": pt["wins"],
+                        "losses": pt["losses"],
+                        "round_profit": pt.get("round_profit", 0)
+                    }
+                    if "round_text" in pt:
+                        profit_info["round_text"] = pt["round_text"]
+
                 try:
-                    flex_msg = build_analysis_flex(room, history, room_totals)
+                    ai_out = {} if pt else None
+                    flex_msg = build_analysis_flex(room, history, room_totals, profit_info, _out_res=ai_out)
                     print(f"[DEBUG] flex built OK, size={len(json.dumps(flex_msg, ensure_ascii=False))}")
                     line_reply(tk, flex_msg)
+                    # Store current AI prediction for next round's profit calculation
+                    if pt and ai_out:
+                        pt["last_prediction"] = ai_out
                 except Exception as e:
                     print(f"[DEBUG] build_analysis_flex ERROR: {e}")
                     traceback.print_exc()
