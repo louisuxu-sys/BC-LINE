@@ -88,8 +88,100 @@ def calculate_slot_logic(total_bet, score_rate):
             level, color, desc = "☁️ 觀望", "#7F8C8D", "數據趨於平衡，建議更換房間或等待下一個週期。"
     return {"space": bonus_space, "level": level, "color": color, "desc": desc}
 
-# ==================== 核心邏輯：百家預測 ====================
+# ==================== 核心邏輯：百家預測 (強化版) ====================
+# --- 8副牌基礎常量 ---
+DECKS = 8
+TOTAL_CARDS = DECKS * 52  # 416張
+# 標準百家樂機率 (8副牌理論值)
+BASE_BANKER_PROB = 0.4586
+BASE_PLAYER_PROB = 0.4462
+BASE_TIE_PROB = 0.0952
+# 賠率設定
+BANKER_PAYOUT = 0.95   # 莊贏賠率 (扣5%佣金)
+PLAYER_PAYOUT = 1.0    # 閒贏賠率
+TIE_PAYOUT = 8.0       # 和贏賠率
+
+def _perm(n, r):
+    """計算 P(n, r) = n * (n-1) * ... * (n-r+1)"""
+    result = 1
+    for i in range(r):
+        result *= (n - i)
+    return result
+
+def _calculate_accuracy_index(round_num):
+    """根據局數計算精準度指標 (0~100%)，局數越多越準確"""
+    def exp_approx(x):
+        return 1 - x + (x**2)/2 - (x**3)/6 + (x**4)/24
+    if round_num < 3:
+        decay = exp_approx(round_num / 3)
+        accuracy = (1 - decay) * 18
+    elif round_num < 6:
+        decay = exp_approx((round_num - 3) / 3)
+        accuracy = 18 + (1 - decay) * 12
+    elif round_num < 10:
+        decay = exp_approx((round_num - 6) / 4)
+        accuracy = 30 + (1 - decay) * 20
+    elif round_num < 30:
+        decay = exp_approx((round_num - 10) / 20)
+        accuracy = 50 + (1 - decay) * 45
+    else:
+        accuracy = 95
+    return min(100, max(0, round(accuracy, 2)))
+
+def _estimate_shoe_state(history):
+    """根據歷史紀錄估算牌靴消耗狀態"""
+    pure = [h for h in history if h in ("莊", "閒")]
+    tie_count = history.count("和")
+    total_hands = len(pure) + tie_count
+    # 平均每手用 4.94 張牌
+    avg_cards_per_hand = 4.94
+    cards_used = total_hands * avg_cards_per_hand
+    remaining = max(TOTAL_CARDS - cards_used, 52)
+    shoe_progress = cards_used / TOTAL_CARDS  # 0~1 牌靴進度
+    return remaining, shoe_progress, total_hands
+
+def _compute_dynamic_probability(history):
+    """根據歷史動態調整莊/閒/和機率"""
+    pure = [h for h in history if h in ("莊", "閒")]
+    tie_count = history.count("和")
+    total_hands = len(pure) + tie_count
+    if total_hands == 0:
+        return BASE_BANKER_PROB, BASE_PLAYER_PROB, BASE_TIE_PROB
+    b_count = pure.count("莊")
+    p_count = pure.count("閒")
+    remaining, shoe_progress, _ = _estimate_shoe_state(history)
+    # 貝葉斯校正：將觀測頻率與理論值加權混合
+    # 局數越多，觀測值權重越高
+    obs_weight = min(total_hands / 60, 0.7)  # 最多觀測佔70%
+    theory_weight = 1 - obs_weight
+    obs_b = b_count / max(len(pure), 1)
+    obs_p = p_count / max(len(pure), 1)
+    obs_t = tie_count / max(total_hands, 1)
+    adj_b = theory_weight * BASE_BANKER_PROB + obs_weight * obs_b
+    adj_p = theory_weight * BASE_PLAYER_PROB + obs_weight * obs_p
+    adj_t = theory_weight * BASE_TIE_PROB + obs_weight * obs_t
+    # 牌靴深度校正：越深入牌靴，偏差越顯著
+    depth_factor = 1 + shoe_progress * 0.15
+    if obs_b > BASE_BANKER_PROB:
+        adj_b *= depth_factor
+    if obs_p > BASE_PLAYER_PROB:
+        adj_p *= depth_factor
+    # 正規化
+    total_prob = adj_b + adj_p + adj_t
+    return adj_b / total_prob, adj_p / total_prob, adj_t / total_prob
+
+def _compute_ev(prob_b, prob_p, prob_t):
+    """計算各下注選項的期望值 (EV)"""
+    # 莊 EV = P(莊贏)*0.95 - P(閒贏)*1 - P(和)*0 (和退注)
+    ev_banker = prob_b * BANKER_PAYOUT - prob_p * 1.0
+    # 閒 EV = P(閒贏)*1 - P(莊贏)*1 - P(和)*0
+    ev_player = prob_p * PLAYER_PAYOUT - prob_b * 1.0
+    # 和 EV = P(和)*8 - P(非和)*1
+    ev_tie = prob_t * TIE_PAYOUT - (1 - prob_t) * 1.0
+    return ev_banker, ev_player, ev_tie
+
 def _detect_patterns(pure):
+    """大路牌型偵測 (強化版)"""
     patterns = []
     if len(pure) < 2:
         return patterns, None, None
@@ -111,7 +203,11 @@ def _detect_patterns(pure):
     confidence = 60
 
     # ===== 長莊 / 長閒 (連續4個或以上) =====
-    if last_len >= 4:
+    if last_len >= 6:
+        patterns.append(f"超級長龍：連續{last_len}{last_val}，強勢延續")
+        suggest = last_val
+        confidence = 82
+    elif last_len >= 4:
         patterns.append(f"長{last_val}：連續{last_len}{last_val}，龍尾延續中")
         suggest = last_val
         confidence = 78
@@ -124,9 +220,9 @@ def _detect_patterns(pure):
     if len(streaks) >= 6:
         r6 = streaks[-6:]
         if all(len(s) == 1 for s in r6):
-            patterns.append(f"大路單跳：莊閒交替出現，預測跳至{opp_val}")
+            patterns.append(f"大路單跳：莊閒交替×6，預測跳至{opp_val}")
             suggest = opp_val
-            confidence = 72
+            confidence = 74
     elif len(streaks) >= 4:
         r4 = streaks[-4:]
         if all(len(s) == 1 for s in r4):
@@ -134,7 +230,20 @@ def _detect_patterns(pure):
             suggest = opp_val
             confidence = 70
 
-    # ===== 一莊兩閒 (莊閒閒 連續出現2次以上) =====
+    # ===== 雙跳 (BBPPBBPP) =====
+    if len(streaks) >= 4:
+        r4 = streaks[-4:]
+        if all(len(s) == 2 for s in r4):
+            if last_len == 2:
+                patterns.append(f"雙跳路：近期雙雙交替，預測跳至{opp_val}")
+                suggest = opp_val
+                confidence = 72
+            elif last_len == 1:
+                patterns.append(f"雙跳路：預測{last_val}再開一局")
+                suggest = last_val
+                confidence = 68
+
+    # ===== 一莊兩閒 / 兩莊一閒 =====
     if len(streaks) >= 4:
         r4 = streaks[-4:]
         lens4 = [len(s) for s in r4]
@@ -158,7 +267,7 @@ def _detect_patterns(pure):
                 suggest = b
                 confidence = 68
 
-    # ===== 逢莊跳 (最新6列，莊只出1個就轉閒) =====
+    # ===== 逢莊跳 / 逢閒跳 =====
     if len(streaks) >= 6:
         r6 = streaks[-6:]
         b_streaks = [s for s in r6 if s[0] == "莊"]
@@ -174,19 +283,17 @@ def _detect_patterns(pure):
                 suggest = "莊"
                 confidence = 72
 
-    # ===== 逢莊連 (莊≥2 閒≥1 莊≥2 閒≥1 莊≥2) =====
+    # ===== 逢莊連 / 逢閒連 =====
     if len(streaks) >= 5:
         r5 = streaks[-5:]
         vals5 = [s[0] for s in r5]
         lens5 = [len(s) for s in r5]
-        # 逢莊連: 莊≥2, 閒≥1, 莊≥2, 閒≥1, 莊≥2
         if vals5[0] == "莊" and vals5[2] == "莊" and vals5[4] == "莊":
             if all(lens5[i] >= 2 for i in [0, 2, 4]) and all(lens5[i] >= 1 for i in [1, 3]):
                 patterns.append("逢莊連：莊每次出現都連續2個以上")
                 if last_val == "莊" and last_len >= 1:
                     suggest = "莊"
                     confidence = 73
-        # 逢閒連: 閒≥2, 莊≥1, 閒≥2, 莊≥1, 閒≥2
         if vals5[0] == "閒" and vals5[2] == "閒" and vals5[4] == "閒":
             if all(lens5[i] >= 2 for i in [0, 2, 4]) and all(lens5[i] >= 1 for i in [1, 3]):
                 patterns.append("逢閒連：閒每次出現都連續2個以上")
@@ -194,7 +301,7 @@ def _detect_patterns(pure):
                     suggest = "閒"
                     confidence = 73
 
-    # ===== 排排連 (相鄰4列都有2個或以上) =====
+    # ===== 排排連 =====
     if len(streaks) >= 4:
         r4 = streaks[-4:]
         if all(len(s) >= 2 for s in r4):
@@ -203,9 +310,31 @@ def _detect_patterns(pure):
                 suggest = last_val
                 confidence = 70
 
+    # ===== 長度遞增 (1,2,3... 或 2,3,4...) =====
+    if len(streaks) >= 3:
+        r3 = streaks[-3:]
+        lens3 = [len(s) for s in r3]
+        if lens3[0] < lens3[1] < lens3[2]:
+            patterns.append(f"遞增路：長度{lens3[0]}→{lens3[1]}→{lens3[2]}，趨勢加強")
+            suggest = last_val
+            confidence = max(confidence, 71)
+        elif lens3[0] > lens3[1] > lens3[2] and lens3[2] == 1:
+            patterns.append(f"遞減路：長度{lens3[0]}→{lens3[1]}→{lens3[2]}，趨勢衰退")
+            suggest = opp_val
+            confidence = max(confidence, 68)
+
+    # ===== 鏡像路 (ABBA pattern) =====
+    if len(streaks) >= 4:
+        r4 = streaks[-4:]
+        lens4 = [len(s) for s in r4]
+        if lens4[0] == lens4[3] and lens4[1] == lens4[2]:
+            patterns.append(f"鏡像路：長度{lens4[0]}-{lens4[1]}-{lens4[2]}-{lens4[3]}對稱")
+            confidence = max(confidence, 69)
+
     return patterns, suggest, confidence
 
 def _analyze_derived(road, name):
+    """分析衍生路趨勢"""
     if not road or len(road) < 3:
         return None
     r_count = road.count("R")
@@ -213,13 +342,21 @@ def _analyze_derived(road, name):
     total = len(road)
     r_pct = round(r_count / total * 100)
     last3 = road[-3:]
+    last5 = road[-min(5, len(road)):]
+    r5 = last5.count("R")
+    # 加強：看最近5筆趨勢
     if all(x == "R" for x in last3):
-        return f"{name}：近期紅多(規律){r_pct}%，趨勢延續"
+        return f"{name}：紅{r_pct}%（近期全紅=規律強）"
     elif all(x == "B" for x in last3):
-        return f"{name}：近期藍多(無規律){100-r_pct}%，趨勢可能反轉"
+        return f"{name}：藍{100-r_pct}%（近期全藍=無規律）"
+    elif r5 >= 4:
+        return f"{name}：紅{r_pct}%（近5筆紅{r5}個=趨勢穩定）"
+    elif r5 <= 1:
+        return f"{name}：藍{100-r_pct}%（近5筆藍{5-r5}個=趨勢混亂）"
     return f"{name}：紅{r_pct}%/藍{100-r_pct}%"
 
 def _derived_vote(road):
+    """衍生路投票：+1=跟趨勢 -1=反轉"""
     if not road or len(road) < 2:
         return 0
     last3 = road[-min(3, len(road)):]
@@ -232,18 +369,30 @@ def _derived_vote(road):
     return 0
 
 def baccarat_ai_logic(history_list, big_eye=None, small_r=None, cockroach=None):
+    """強化版百家AI邏輯：結合機率模型 + 牌路分析 + 衍生路 + EV計算"""
     pure_history = [h for h in history_list if h in ["莊", "閒"]]
     if not pure_history:
-        return {"下注": "等待數據", "勝率": 50, "建議注碼": "觀察", "模式": "數據不足", "理由": "數據不足，等待更多開牌紀錄"}
+        return {"下注": "等待數據", "勝率": 50, "建議注碼": "觀察", "模式": "數據不足",
+                "理由": "數據不足，等待更多開牌紀錄", "精準度": 0}
     counts = Counter(pure_history)
     b_count = counts.get("莊", 0)
     p_count = counts.get("閒", 0)
     total = b_count + p_count
     b_pct = round(b_count / total * 100) if total else 50
     p_pct = 100 - b_pct
-    # Detect big road patterns
+
+    # --- (1) 機率模型：動態機率 + EV ---
+    prob_b, prob_p, prob_t = _compute_dynamic_probability(history_list)
+    ev_b, ev_p, ev_t = _compute_ev(prob_b, prob_p, prob_t)
+    remaining_cards, shoe_progress, total_hands = _estimate_shoe_state(history_list)
+
+    # --- (2) 精準度指標 ---
+    accuracy = _calculate_accuracy_index(total_hands)
+
+    # --- (3) 大路牌型偵測 ---
     patterns, suggest, confidence = _detect_patterns(pure_history)
-    # Derived road analysis
+
+    # --- (4) 衍生路分析 ---
     derived_reasons = []
     derived_score = 0
     for road, name in [(big_eye, "大眼仔"), (small_r, "小路"), (cockroach, "蟑螂路")]:
@@ -251,56 +400,120 @@ def baccarat_ai_logic(history_list, big_eye=None, small_r=None, cockroach=None):
         if info:
             derived_reasons.append(info)
         derived_score += _derived_vote(road)
-    # Current streak
+
+    # --- (5) 當前連莊/連閒 ---
     streak = 1
     for i in range(len(pure_history) - 2, -1, -1):
         if pure_history[i] == pure_history[-1]:
             streak += 1
         else:
             break
-    # Base prediction from big road
-    if suggest:
-        final_prediction = suggest
-        conf = confidence
-    elif b_count <= p_count:
-        final_prediction = "莊"
-        conf = random.randint(58, 68)
+
+    # --- (6) 綜合決策：多維度加權 ---
+    score_banker = 0
+    score_player = 0
+    decision_factors = []
+
+    # 維度A：EV (期望值) → 權重 30%
+    if ev_b > ev_p:
+        score_banker += 30
+        decision_factors.append(f"EV莊{ev_b:+.4f} > 閒{ev_p:+.4f}")
     else:
-        final_prediction = "閒"
-        conf = random.randint(58, 68)
-    # Derived roads influence: if score > 0 (mostly Red/pattern), follow current trend
-    # If score < 0 (mostly Blue/random), predict reversal
+        score_player += 30
+        decision_factors.append(f"EV閒{ev_p:+.4f} > 莊{ev_b:+.4f}")
+
+    # 維度B：動態機率 → 權重 25%
+    if prob_b > prob_p:
+        score_banker += 25
+    else:
+        score_player += 25
+
+    # 維度C：大路牌型 → 權重 25%
+    if suggest == "莊":
+        score_banker += 25
+    elif suggest == "閒":
+        score_player += 25
+    else:
+        # 無明確牌型建議，微偏莊 (理論優勢)
+        score_banker += 13
+        score_player += 12
+
+    # 維度D：衍生路 → 權重 20%
     if derived_score >= 2:
-        conf = min(conf + 5, 85)
-        if streak >= 2:
-            final_prediction = pure_history[-1]
+        # 規律強，跟隨當前趨勢
+        if pure_history[-1] == "莊":
+            score_banker += 20
+        else:
+            score_player += 20
     elif derived_score <= -2:
-        conf = min(conf + 3, 80)
-        opp = "閒" if pure_history[-1] == "莊" else "莊"
-        if not suggest:
-            final_prediction = opp
-    # Mode
-    if streak >= 3:
-        mode = "長龍模式"
+        # 無規律，反轉
+        if pure_history[-1] == "莊":
+            score_player += 20
+        else:
+            score_banker += 20
+    else:
+        score_banker += 10
+        score_player += 10
+
+    # 最終預測
+    if score_banker > score_player:
+        final_prediction = "莊"
+        conf = min(55 + int((score_banker - score_player) * 0.6) + int(accuracy * 0.15), 92)
+    elif score_player > score_banker:
+        final_prediction = "閒"
+        conf = min(55 + int((score_player - score_banker) * 0.6) + int(accuracy * 0.15), 92)
+    else:
+        final_prediction = "莊"  # 平局偏莊
+        conf = 58
+
+    # 牌型置信度加成
+    if suggest and confidence > 70:
+        conf = max(conf, confidence)
+
+    # --- (7) 模式 & 注碼建議 ---
+    best_ev = max(ev_b, ev_p)
+    if streak >= 4 and best_ev > 0:
+        mode = "🔥 強勢長龍"
+        bet = "3單位(加注)"
+    elif streak >= 3:
+        mode = "🐉 長龍模式"
+        bet = "2單位"
+    elif best_ev > 0.01:
+        mode = "✅ 正EV模式"
         bet = "2單位"
     elif patterns or derived_reasons:
-        mode = "好路模式"
+        mode = "📈 好路模式"
+        bet = "1單位"
+    elif best_ev > -0.005:
+        mode = "⚖️ 平衡模式"
         bet = "1單位"
     else:
-        mode = "趨勢掃描"
-        bet = "1單位"
-    # Build reason text
-    reasons = [f"莊 {b_pct}% / 閒 {p_pct}%"]
+        mode = "☁️ 觀望模式"
+        bet = "0.5單位(縮注)"
+
+    # --- (8) 組建理由文字 ---
+    reasons = []
+    # 機率統計
+    reasons.append(f"📊 機率：莊{prob_b*100:.1f}% / 閒{prob_p*100:.1f}% / 和{prob_t*100:.1f}%")
+    reasons.append(f"💰 EV：莊{ev_b:+.4f} / 閒{ev_p:+.4f}")
+    reasons.append(f"📈 精準度：{accuracy}% (已分析{total_hands}局)")
+    reasons.append(f"🃏 牌靴進度：{shoe_progress*100:.0f}% (約剩{remaining_cards:.0f}張)")
+    # 歷史統計
+    reasons.append(f"📋 歷史：莊{b_pct}%({b_count}局) / 閒{p_pct}%({p_count}局)")
     if streak >= 2:
-        reasons.append(f"連{streak}{pure_history[-1]}")
+        reasons.append(f"🔗 連{streak}{pure_history[-1]}")
+    # 牌型
     for p in patterns:
-        reasons.append(p)
+        reasons.append(f"🎯 {p}")
+    # 衍生路
     for d in derived_reasons:
-        reasons.append(d)
+        reasons.append(f"🔍 {d}")
     if not patterns and not derived_reasons:
-        reasons.append("暫無明顯好路，依統計趨勢推薦")
-    reason_text = "📊 符合牌路：\n" + "\n".join(f"• {r}" for r in reasons)
-    return {"下注": final_prediction, "勝率": conf, "建議注碼": bet, "模式": mode, "理由": reason_text}
+        reasons.append("⏳ 暫無明顯好路，依機率模型推薦")
+
+    reason_text = "📊 AI分析報告：\n" + "\n".join(f"• {r}" for r in reasons)
+    return {"下注": final_prediction, "勝率": conf, "建議注碼": bet, "模式": mode,
+            "理由": reason_text, "精準度": accuracy}
 
 # ==================== 五路算法 ====================
 def compute_big_road(history, max_rows=6):
@@ -575,10 +788,11 @@ def build_analysis_flex(room, history, total_counts=None):
         c = Counter(history)
         stats = f"莊:{c.get('莊', 0)}  閒:{c.get('閒', 0)}  和:{c.get('和', 0)}  總:{sum(c.values())}"
     bet_text = res.get('建議開倉', res.get('建議注碼', '1單位'))
+    accuracy = res.get('精準度', 0)
     pred = [
         {"type": "text", "text": f"🎯 預測：{res['下注']}", "weight": "bold", "size": "xl", "color": "#D35400", "align": "center"},
         {"type": "text", "text": f"信心：{res['勝率']}%  |  注碼：{bet_text}", "size": "sm", "align": "center", "color": "#1E8449"},
-        {"type": "text", "text": stats, "size": "xxs", "color": "#666666", "align": "center", "margin": "xs"}
+        {"type": "text", "text": f"🧠 AI精準度：{accuracy}%  |  {stats}", "size": "xxs", "color": "#666666", "align": "center", "margin": "xs"}
     ]
     if reason_text:
         pred.append({"type": "text", "text": reason_text, "size": "xxs", "color": "#888888", "align": "center", "wrap": True, "margin": "xs"})
