@@ -369,23 +369,32 @@ def _derived_vote(road):
         return -1
     return 0
 
-def baccarat_ai_logic(history_list, big_eye=None, small_r=None, cockroach=None):
+def baccarat_ai_logic(history_list, big_eye=None, small_r=None, cockroach=None, total_counts=None):
     """強化版百家AI邏輯：結合機率模型 + 牌路分析 + 衍生路 + 期望值計算"""
     pure_history = [h for h in history_list if h in ["莊", "閒"]]
     if not pure_history:
         return {"下注": "等待數據", "勝率": 50, "建議注碼": "觀察", "模式": "數據不足",
                 "理由": "數據不足，等待更多開牌紀錄", "精準度": 0}
-    counts = Counter(pure_history)
-    b_count = counts.get("莊", 0)
-    p_count = counts.get("閒", 0)
-    total = b_count + p_count
+    # 使用累計總數（若有）來計算精準度和統計
+    if total_counts:
+        b_count = total_counts.get("莊", 0)
+        p_count = total_counts.get("閒", 0)
+        t_count = total_counts.get("和", 0)
+        total = b_count + p_count
+        total_hands = b_count + p_count + t_count
+    else:
+        counts = Counter(pure_history)
+        b_count = counts.get("莊", 0)
+        p_count = counts.get("閒", 0)
+        total = b_count + p_count
+        total_hands = len(history_list)
     b_pct = round(b_count / total * 100) if total else 50
     p_pct = 100 - b_pct
 
     # --- (1) 機率模型：動態機率 + EV ---
     prob_b, prob_p, prob_t = _compute_dynamic_probability(history_list)
     ev_b, ev_p, ev_t = _compute_ev(prob_b, prob_p, prob_t)
-    remaining_cards, shoe_progress, total_hands = _estimate_shoe_state(history_list)
+    remaining_cards, shoe_progress, _ = _estimate_shoe_state(history_list)
 
     # --- (2) 精準度指標 ---
     accuracy = _calculate_accuracy_index(total_hands)
@@ -797,7 +806,7 @@ def build_analysis_flex(room, history, total_counts=None, profit_info=None, _out
     big_road_grid = compute_big_road(history)
     big_road_cols = compute_big_road_cols(history)
     big_eye, small_r, cockroach = compute_derived_roads(big_road_cols)
-    res = baccarat_ai_logic(history, big_eye, small_r, cockroach)
+    res = baccarat_ai_logic(history, big_eye, small_r, cockroach, total_counts=total_counts)
     if _out_res is not None:
         _out_res.update(res)
     reason_text = res.get("理由", "")
@@ -1047,7 +1056,10 @@ def webhook():
             if uid in baccarat_history_dict and room in baccarat_history_dict[uid]:
                 baccarat_history_dict[uid][room] = []
                 baccarat_history_dict[uid].pop(f"{room}_total", None)
-            line_reply(tk, sys_bubble(f"✅ {room} 紀錄已清除"))
+            clear_msg = f"✅ {room} 牌路已清除"
+            if uid in profit_tracker:
+                clear_msg += "\n\n💰 獲利計算仍持續中\n請繼續輸入開牌結果"
+            line_reply(tk, text_with_back(clear_msg))
             continue
 
         # 2. 狀態機與功能入口
