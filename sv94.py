@@ -1172,11 +1172,31 @@ def webhook():
         if msg == "百家預測":
             if status == "active":
                 chat_modes[uid] = "choose_provider"
-                line_reply(tk, sys_bubble(f"🔑 授權剩餘：{left}\n請選擇平台：", [
-                    {"type": "action", "action": {"type": "message", "label": "MT真人", "text": "平台:MT"}},
-                    {"type": "action", "action": {"type": "message", "label": "DG真人", "text": "平台:DG"}},
-                    {"type": "action", "action": {"type": "message", "label": "↩ 返回主選單", "text": "返回主選單"}}
-                ]))
+                BASE_URL = "https://bc-line-kmh9.onrender.com"
+                provider_flex = {
+                    "type": "flex", "altText": "請選擇平台",
+                    "contents": {
+                        "type": "bubble", "size": "mega",
+                        "header": {"type": "box", "layout": "vertical", "backgroundColor": "#1A5276", "paddingAll": "md", "contents": [
+                            {"type": "text", "text": "🎲 請選擇遊戲平台", "color": "#ffffff", "weight": "bold", "size": "lg", "align": "center"},
+                            {"type": "text", "text": f"🔑 授權剩餘：{left}", "color": "#AED6F1", "size": "xs", "align": "center", "margin": "xs"}
+                        ]},
+                        "body": {"type": "box", "layout": "horizontal", "spacing": "lg", "paddingAll": "lg", "contents": [
+                            {"type": "box", "layout": "vertical", "flex": 1, "cornerRadius": "lg", "backgroundColor": "#F8F9FA", "paddingAll": "md", "contents": [
+                                {"type": "image", "url": f"{BASE_URL}/static/MT.jpg", "size": "full", "aspectRatio": "1:1", "aspectMode": "cover"},
+                                {"type": "text", "text": "MT真人", "weight": "bold", "size": "md", "align": "center", "margin": "sm", "color": "#2C3E50"},
+                            ], "action": {"type": "message", "label": "MT真人", "text": "平台:MT"}},
+                            {"type": "box", "layout": "vertical", "flex": 1, "cornerRadius": "lg", "backgroundColor": "#F8F9FA", "paddingAll": "md", "contents": [
+                                {"type": "image", "url": f"{BASE_URL}/static/DG.png", "size": "full", "aspectRatio": "1:1", "aspectMode": "cover"},
+                                {"type": "text", "text": "DG真人", "weight": "bold", "size": "md", "align": "center", "margin": "sm", "color": "#2C3E50"},
+                            ], "action": {"type": "message", "label": "DG真人", "text": "平台:DG"}}
+                        ]},
+                        "footer": {"type": "box", "layout": "vertical", "contents": [
+                            {"type": "button", "action": {"type": "message", "label": "↩ 返回主選單", "text": "返回主選單"}, "style": "primary", "color": "#1A5276", "height": "sm"}
+                        ]}
+                    }
+                }
+                line_reply(tk, provider_flex)
             else:
                 line_reply(tk, sys_bubble("❌ 權限已過期或未開通。"))
             continue
