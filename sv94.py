@@ -1187,7 +1187,7 @@ def webhook():
                                 {"type": "text", "text": "MT真人", "weight": "bold", "size": "md", "align": "center", "margin": "sm", "color": "#2C3E50"},
                             ], "action": {"type": "message", "label": "MT真人", "text": "平台:MT"}},
                             {"type": "box", "layout": "vertical", "flex": 1, "cornerRadius": "lg", "backgroundColor": "#F8F9FA", "paddingAll": "md", "contents": [
-                                {"type": "image", "url": f"{BASE_URL}/static/DG.png", "size": "full", "aspectRatio": "1:1", "aspectMode": "cover"},
+                                {"type": "image", "url": f"{BASE_URL}/static/DG.jpg", "size": "full", "aspectRatio": "1:1", "aspectMode": "cover"},
                                 {"type": "text", "text": "DG真人", "weight": "bold", "size": "md", "align": "center", "margin": "sm", "color": "#2C3E50"},
                             ], "action": {"type": "message", "label": "DG真人", "text": "平台:DG"}}
                         ]},
