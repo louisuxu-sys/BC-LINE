@@ -471,52 +471,42 @@ def baccarat_ai_logic(history_list, big_eye=None, small_r=None, cockroach=None):
     if suggest and confidence > 70:
         conf = max(conf, confidence)
 
-    # --- (7) 模式 & 注碼建議 (1~10級) ---
+    # --- (7) 模式 & 注碼建議 (1~5級，保守策略) ---
     best_ev = max(ev_b, ev_p)
     score_diff = abs(score_banker - score_player)
 
-    # 基礎注碼：由信心度映射 (conf 55~92 → 注碼 1~6)
-    bet_units = max(1, min(6, round((conf - 55) / 6.5) + 1))
+    # 基礎注碼：由信心度映射 (conf 55~92 → 注碼 1~3)
+    bet_units = max(1, min(3, round((conf - 55) / 15) + 1))
 
-    # 加分因子
-    if streak >= 5:
-        bet_units += 3
-    elif streak >= 4:
+    # 加分因子（保守）
+    if streak >= 5 and best_ev > 0:
         bet_units += 2
+    elif streak >= 4 and best_ev > 0:
+        bet_units += 1
     elif streak >= 3:
         bet_units += 1
-    if best_ev > 0.02:
-        bet_units += 2
-    elif best_ev > 0.005:
-        bet_units += 1
-    if patterns and confidence and confidence >= 72:
-        bet_units += 1
-    if abs(derived_score) >= 2:
+    if patterns and confidence and confidence >= 72 and best_ev > 0:
         bet_units += 1
 
     # 減分因子
-    if best_ev < -0.01:
-        bet_units -= 2
-    elif best_ev < -0.005:
+    if best_ev < -0.005:
         bet_units -= 1
     if score_diff <= 5:
         bet_units -= 1
     if total_hands < 5:
-        bet_units = min(bet_units, 3)
+        bet_units = min(bet_units, 2)
 
-    # 限制範圍 1~10
-    bet_units = max(1, min(10, bet_units))
+    # 限制範圍 1~5
+    bet_units = max(1, min(5, bet_units))
 
     bet = f"{bet_units}單位"
 
     # 模式判定
-    if bet_units >= 8:
-        mode = "🔥 強勢出擊"
-    elif bet_units >= 6:
-        mode = "🐉 積極進攻"
-    elif bet_units >= 4:
+    if bet_units >= 4:
+        mode = "🔥 強勢跟進"
+    elif bet_units == 3:
         mode = "✅ 穩健跟進"
-    elif bet_units >= 2:
+    elif bet_units == 2:
         mode = "📈 輕注試探"
     else:
         mode = "☁️ 觀望為主"
