@@ -903,9 +903,9 @@ def build_slot_flex(room, res):
 # ==================== LINE 回覆 ====================
 def line_reply(reply_token, payload):
     MENU_QUICK_REPLY = {"items": [
+        {"type": "action", "action": {"type": "message", "label": "計算獲利", "text": "計算獲利"}},
         {"type": "action", "action": {"type": "message", "label": "百家預測", "text": "百家預測"}},
         {"type": "action", "action": {"type": "message", "label": "電子預測", "text": "電子預測"}},
-        {"type": "action", "action": {"type": "message", "label": "計算獲利", "text": "計算獲利"}},
         {"type": "action", "action": {"type": "message", "label": "儲值", "text": "儲值"}}
     ]}
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {LINE_ACCESS_TOKEN}"}
@@ -949,9 +949,9 @@ def text_with_back(text):
 # ==================== 輔助功能 ====================
 def send_main_menu(tk):
     line_reply(tk, sys_bubble("--- 新紀元 AI 系統 ---", [
+        {"type": "action", "action": {"type": "message", "label": "計算獲利", "text": "計算獲利"}},
         {"type": "action", "action": {"type": "message", "label": "百家預測", "text": "百家預測"}},
         {"type": "action", "action": {"type": "message", "label": "電子預測", "text": "電子預測"}},
-        {"type": "action", "action": {"type": "message", "label": "計算獲利", "text": "計算獲利"}},
         {"type": "action", "action": {"type": "message", "label": "儲值", "text": "儲值"}}
     ]))
 
@@ -1003,6 +1003,13 @@ def webhook():
 
     data = request.json
     for event in data.get("events", []):
+        # 處理 follow 事件 (新用戶加入)
+        if event["type"] == "follow":
+            uid = event["source"]["userId"]
+            tk = event["replyToken"]
+            print(f"[FOLLOW] new user: {uid[-6:]}")
+            send_main_menu(tk)
+            continue
         if event["type"] != "message" or "text" not in event["message"]:
             continue
         uid = event["source"]["userId"]
@@ -1123,12 +1130,13 @@ def webhook():
                 line_reply(tk, sys_bubble(
                     f"✅ 獲利計算已啟動\n\n"
                     f"🎯 1單位金額：{unit:,.0f}\n\n"
-                    f"現在請點擊【百家預測】開始遊戲\n"
+                    f"請選擇遊戲館開始遊戲\n"
                     f"每局開牌後系統會自動計算損益\n\n"
                     f"輸入【結算】可查看完整報表\n"
                     f"輸入【關閉獲利】停止計算",
                     [
                         {"type": "action", "action": {"type": "message", "label": "百家預測", "text": "百家預測"}},
+                        {"type": "action", "action": {"type": "message", "label": "電子預測", "text": "電子預測"}},
                         {"type": "action", "action": {"type": "message", "label": "↩ 返回主選單", "text": "返回主選單"}}
                     ]
                 ))
