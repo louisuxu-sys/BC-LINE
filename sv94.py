@@ -1600,11 +1600,26 @@ def webhook():
 @app.route("/", methods=["GET"])
 @app.route("/health", methods=["GET"])
 def health():
-    return jsonify({"status": "ok", "service": "sv94-bot"})
+    from mt_ws_listener import get_all_tables, is_listener_running
+    tables = get_all_tables()
+    return jsonify({
+        "status": "ok",
+        "service": "sv94-bot",
+        "mt_listener": is_listener_running(),
+        "mt_tables": len(tables),
+        "mt_table_ids": tables[:5] if tables else []
+    })
 
 # gunicorn 啟動時也需要載入資料
 user_access_data = load_data(USER_DATA_FILE)
 time_cards_data = load_data(TIME_CARDS_FILE, {"active_cards": {}, "used_cards": {}})
+
+# 啟動 MT 即時牌路監聽器（背景執行緒）
+try:
+    _ensure_mt_listener()
+    print("[MT] 即時牌路監聽器已隨 app 啟動")
+except Exception as e:
+    print(f"[MT] 監聽器啟動失敗（將在用戶觸發時重試）: {e}")
 
 if __name__ == "__main__":
     print("=== SV94 Bot 啟動成功 (port 5001) ===")
