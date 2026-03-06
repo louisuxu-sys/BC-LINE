@@ -9,6 +9,7 @@ import json
 import time
 import threading
 import logging
+import traceback as _tb
 
 logger = logging.getLogger(__name__)
 
@@ -162,12 +163,19 @@ async def _run_listener():
 
     while _listener_running:
         try:
+            logger.info("[Listener] Step1: 取得 MT token...")
             token = await get_mt_token()
+            logger.info("[Listener] Step1 OK: token=%s...", token[:20] if token else "None")
             mt_url = f"https://gsa.ofalive99.net/?token={token}&lang=zhtw"
-            logger.info("[Listener] 開啟 MT 頁面: %s", mt_url[:60])
+            logger.info("[Listener] Step2: 啟動 Playwright...")
 
             async with async_playwright() as p:
-                browser = await p.chromium.launch(headless=True)
+                logger.info("[Listener] Step2a: launching chromium...")
+                browser = await p.chromium.launch(
+                    headless=True,
+                    args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"]
+                )
+                logger.info("[Listener] Step2b: browser launched OK")
                 context = await browser.new_context(
                     viewport={"width": 1280, "height": 800},
                     user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -215,8 +223,10 @@ async def _run_listener():
 
                 page.on("websocket", on_ws)
 
-                await page.goto(mt_url, wait_until="networkidle", timeout=60000)
+                await page.goto(mt_url, wait_until="domcontentloaded", timeout=60000)
                 logger.info("[Listener] MT 頁面載入完成")
+                # 額外等待讓 JS 啟動 WS
+                await asyncio.sleep(5)
 
                 # 等待 WS 連線
                 try:
@@ -245,7 +255,7 @@ async def _run_listener():
                 await browser.close()
 
         except Exception as e:
-            logger.error("[Listener] 錯誤: %s", e)
+            logger.error("[Listener] 錯誤: %s\n%s", e, _tb.format_exc())
 
         if _listener_running:
             logger.info("[Listener] %d 秒後重新連線...", reconnect_delay)
