@@ -14,6 +14,67 @@ from collections import Counter
 
 app = Flask(__name__)
 
+# --- MT 即時房間數據 ---
+_mt_rooms_cache = []  # 快取的房間列表
+_mt_rooms_lock = threading.Lock()
+
+def _refresh_mt_rooms_bg():
+    """背景執行緒取得 MT 房間數據"""
+    global _mt_rooms_cache
+    try:
+        from mt_rooms import get_mt_rooms_sync
+        rooms = get_mt_rooms_sync()
+        if rooms:
+            with _mt_rooms_lock:
+                _mt_rooms_cache = rooms
+            print(f"[MT] 房間數據已更新: {len(rooms)} 桌")
+    except Exception as e:
+        print(f"[MT] 房間數據更新失敗: {e}")
+
+def get_cached_mt_rooms():
+    """取得快取的 MT 房間數據"""
+    with _mt_rooms_lock:
+        return list(_mt_rooms_cache)
+
+def refresh_mt_rooms_async():
+    """非阻塞更新 MT 房間數據"""
+    t = threading.Thread(target=_refresh_mt_rooms_bg, daemon=True)
+    t.start()
+
+# --- MT 即時牌路追蹤 ---
+from mt_ws_listener import (
+    start_listener as _start_mt_listener,
+    get_table_history, get_table_info, is_listener_running,
+    DISPLAY_TO_TABLE, TABLE_DISPLAY_MAP,
+    display_to_table_id, table_id_to_display,
+)
+
+def _ensure_mt_listener():
+    """確保 MT 監聽器在運行"""
+    if not is_listener_running():
+        try:
+            _start_mt_listener()
+            print("[MT] 啟動即時牌路監聽器")
+        except Exception as e:
+            print(f"[MT] 啟動監聽器失敗: {e}")
+
+def get_live_history(room_display_name):
+    """用房間顯示名稱取得即時牌路歷史
+    room_display_name: 如 '百家樂 1', '龍虎 3'
+    回傳: list of '莊'/'閒'/'和' 或 []
+    """
+    tid = display_to_table_id(room_display_name)
+    if not tid:
+        return []
+    return get_table_history(tid)
+
+def get_live_info(room_display_name):
+    """取得即時桌台資訊"""
+    tid = display_to_table_id(room_display_name)
+    if not tid:
+        return {}
+    return get_table_info(tid)
+
 # --- 基礎配置 ---
 LINE_ACCESS_TOKEN = os.environ.get("LINE_ACCESS_TOKEN", "Y6KHkjxZnW9I0pbDV6ogI3A0/+USC4q2+bnnTgBrG9A/WT7Hm8dpLGmviC4jNM3mk186VYBkyAag7wFqYMXE92fJXSvUm/xFCmjOdDm0rPZ0+dnnBNMYR7Kpj5xmsBslD4e+BlFjOTfXrlILdXdRTAdB04t89/1O/w1cDnyilFU=")
 LINE_CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET", "107a3917516a9c8efc23c3229aaefc71")
@@ -1207,6 +1268,9 @@ def webhook():
             p_name = "MT真人" if "MT" in msg else "DG真人"
             if "MT" in msg:
                 chat_modes[uid] = {"state": "mt_choose_category", "p": p_name}
+                # 提前觸發背景更新房間數據
+                if not get_cached_mt_rooms():
+                    refresh_mt_rooms_async()
                 BASE_URL = "https://bc-line-kmh9.onrender.com"
                 cat_flex = {
                     "type": "flex", "altText": "MT真人 - 選擇遊戲廳",
@@ -1237,46 +1301,96 @@ def webhook():
 
         elif isinstance(mode, dict) and mode.get("state") == "mt_choose_category" and msg.startswith("MT廳:"):
             category = msg.replace("MT廳:", "")
-            if category == "中文廳":
-                rooms = [f"百家樂{i}" for i in range(1, 11)]
-                chat_modes[uid] = {"state": "choose_room", "p": "MT真人"}
-                btns = [{"type": "button", "action": {"type": "message", "label": r, "text": r}, "style": "primary", "color": "#2E86C1", "height": "sm"} for r in rooms[:10]]
-                # LINE Flex 最多 6 buttons per box，分兩行
-                row1 = [{"type": "button", "action": {"type": "message", "label": f"百家樂{i}", "text": f"百家樂{i}"}, "style": "primary", "color": "#2E86C1", "height": "sm"} for i in range(1, 6)]
-                row2 = [{"type": "button", "action": {"type": "message", "label": f"百家樂{i}", "text": f"百家樂{i}"}, "style": "primary", "color": "#2E86C1", "height": "sm"} for i in range(6, 11)]
+            chat_modes[uid] = {"state": "choose_room", "p": "MT真人"}
+
+            # 取得即時房間數據
+            live_rooms = get_cached_mt_rooms()
+            # 按類別篩選
+            cat_map = {"中文廳": "中文廳", "亞洲廳": "亞洲廳", "龍虎": "龍虎"}
+            target_cat = cat_map.get(category, category)
+            cat_rooms = [r for r in live_rooms if r.get("category") == target_cat] if live_rooms else []
+
+            # 顏色設定
+            color_map = {"中文廳": "#2E86C1", "亞洲廳": "#1A5276", "龍虎": "#D4AC0D"}
+            header_color = color_map.get(category, "#2E86C1")
+            emoji_map = {"中文廳": "🎲", "亞洲廳": "🎲", "龍虎": "🐉"}
+            emoji = emoji_map.get(category, "🎲")
+
+            if cat_rooms:
+                # ── 有即時數據：顯示每桌的荷官、人數、統計 ──
+                room_items = []
+                for r in cat_rooms:
+                    tid = r["table_id"]
+                    tname = r.get("table_name", "")
+                    dealer = r.get("dealer_name", "?")
+                    players = r.get("total_players", 0)
+                    shoe = r.get("current_shoe", "?")
+                    rnd = r.get("current_round", "?")
+                    b = r.get("banker_wins", "0")
+                    p_w = r.get("player_wins", "0")
+                    t_w = r.get("tie_count", "0")
+                    # 房間顯示名稱
+                    if tid.startswith("BAG"):
+                        display = f"百家樂{tname}"
+                    elif tid.startswith("DTG"):
+                        display = f"龍虎{tname}"
+                    else:
+                        display = f"{tname}"
+                    info_line = f"👩{dealer} 👥{players} | 莊{b} 閒{p_w} 和{t_w}"
+                    room_items.append({
+                        "type": "box", "layout": "vertical", "spacing": "xs",
+                        "paddingAll": "sm", "backgroundColor": "#f0f0f0", "cornerRadius": "md",
+                        "action": {"type": "message", "label": display, "text": display},
+                        "contents": [
+                            {"type": "text", "text": f"{emoji} {display}", "weight": "bold", "size": "sm", "color": "#333333"},
+                            {"type": "text", "text": info_line, "size": "xxs", "color": "#666666", "wrap": True}
+                        ]
+                    })
+                room_items.append({"type": "button", "action": {"type": "message", "label": "↩ 返回主選單", "text": "返回主選單"}, "style": "secondary", "height": "sm"})
                 room_flex = {
-                    "type": "flex", "altText": "MT中文廳 - 選擇房間",
+                    "type": "flex", "altText": f"MT{category} - 選擇房間",
                     "contents": {
                         "type": "bubble", "size": "mega",
-                        "header": {"type": "box", "layout": "vertical", "backgroundColor": "#2E86C1", "paddingAll": "sm", "contents": [
-                            {"type": "text", "text": "🎲 MT真人 - 中文廳", "color": "#ffffff", "weight": "bold", "size": "md", "align": "center"}
+                        "header": {"type": "box", "layout": "vertical", "backgroundColor": header_color, "paddingAll": "sm", "contents": [
+                            {"type": "text", "text": f"{emoji} MT真人 - {category}", "color": "#ffffff", "weight": "bold", "size": "md", "align": "center"},
+                            {"type": "text", "text": "🔴 即時數據", "color": "#FFD700", "size": "xxs", "align": "center"}
                         ]},
-                        "body": {"type": "box", "layout": "vertical", "spacing": "sm", "paddingAll": "md", "contents": row1 + row2 + [
-                            {"type": "button", "action": {"type": "message", "label": "百家樂3A", "text": "百家樂3A"}, "style": "secondary", "height": "sm"},
-                            {"type": "button", "action": {"type": "message", "label": "↩ 返回主選單", "text": "返回主選單"}, "style": "secondary", "height": "sm"}
-                        ]}
+                        "body": {"type": "box", "layout": "vertical", "spacing": "sm", "paddingAll": "md", "contents": room_items}
                     }
                 }
                 line_reply(tk, room_flex)
-            elif category == "亞洲廳":
-                chat_modes[uid] = {"state": "choose_room", "p": "MT真人"}
-                row = [{"type": "button", "action": {"type": "message", "label": f"百家樂{i}", "text": f"百家樂{i}"}, "style": "primary", "color": "#1A5276", "height": "sm"} for i in range(11, 16)]
+            else:
+                # ── 無即時數據：fallback 靜態列表 ──
+                if category == "中文廳":
+                    row1 = [{"type": "button", "action": {"type": "message", "label": f"百家樂{i}", "text": f"百家樂{i}"}, "style": "primary", "color": "#2E86C1", "height": "sm"} for i in range(1, 6)]
+                    row2 = [{"type": "button", "action": {"type": "message", "label": f"百家樂{i}", "text": f"百家樂{i}"}, "style": "primary", "color": "#2E86C1", "height": "sm"} for i in range(6, 14)]
+                    body_items = row1 + row2 + [
+                        {"type": "button", "action": {"type": "message", "label": "百家樂3A", "text": "百家樂3A"}, "style": "secondary", "height": "sm"},
+                        {"type": "button", "action": {"type": "message", "label": "↩ 返回主選單", "text": "返回主選單"}, "style": "secondary", "height": "sm"}
+                    ]
+                elif category == "亞洲廳":
+                    body_items = [
+                        {"type": "button", "action": {"type": "message", "label": "百家樂3A", "text": "百家樂3A"}, "style": "primary", "color": "#1A5276", "height": "sm"},
+                        {"type": "button", "action": {"type": "message", "label": "↩ 返回主選單", "text": "返回主選單"}, "style": "secondary", "height": "sm"}
+                    ]
+                elif category == "龍虎":
+                    body_items = [{"type": "button", "action": {"type": "message", "label": f"龍虎{i}", "text": f"龍虎{i}"}, "style": "primary", "color": "#D4AC0D", "height": "sm"} for i in range(1, 4)]
+                    body_items.append({"type": "button", "action": {"type": "message", "label": "↩ 返回主選單", "text": "返回主選單"}, "style": "secondary", "height": "sm"})
+                else:
+                    body_items = [{"type": "button", "action": {"type": "message", "label": "↩ 返回主選單", "text": "返回主選單"}, "style": "secondary", "height": "sm"}]
                 room_flex = {
-                    "type": "flex", "altText": "MT亞洲廳 - 選擇房間",
+                    "type": "flex", "altText": f"MT{category} - 選擇房間",
                     "contents": {
                         "type": "bubble", "size": "mega",
-                        "header": {"type": "box", "layout": "vertical", "backgroundColor": "#1A5276", "paddingAll": "sm", "contents": [
-                            {"type": "text", "text": "🎲 MT真人 - 亞洲廳", "color": "#ffffff", "weight": "bold", "size": "md", "align": "center"}
+                        "header": {"type": "box", "layout": "vertical", "backgroundColor": header_color, "paddingAll": "sm", "contents": [
+                            {"type": "text", "text": f"{emoji} MT真人 - {category}", "color": "#ffffff", "weight": "bold", "size": "md", "align": "center"}
                         ]},
-                        "body": {"type": "box", "layout": "vertical", "spacing": "sm", "paddingAll": "md", "contents": row + [
-                            {"type": "button", "action": {"type": "message", "label": "↩ 返回主選單", "text": "返回主選單"}, "style": "secondary", "height": "sm"}
-                        ]}
+                        "body": {"type": "box", "layout": "vertical", "spacing": "sm", "paddingAll": "md", "contents": body_items}
                     }
                 }
                 line_reply(tk, room_flex)
-            elif category == "龍虎":
-                chat_modes[uid] = {"state": "choose_room", "p": "MT真人"}
-                line_reply(tk, text_with_back("🐉 MT真人 - 龍虎\n\n請輸入房號：\n(例如：龍虎1、龍虎2、龍虎3)"))
+                # 觸發背景更新，下次就有即時數據
+                refresh_mt_rooms_async()
             continue
 
         elif isinstance(mode, dict) and mode.get("state") == "choose_room":
@@ -1286,17 +1400,105 @@ def webhook():
                 rn = room_name
                 if rn.startswith("百家樂") and len(rn) > 3 and rn[3] != " ":
                     rn = "百家樂 " + rn[3:]
+                if rn.startswith("龍虎") and len(rn) > 2 and rn[2] != " ":
+                    rn = "龍虎 " + rn[2:]
                 room_name = rn
-                mt_valid = [f"百家樂 {i}" for i in range(1, 16)] + ["百家樂 3A"]
+                mt_valid = [f"百家樂 {i}" for i in range(1, 14)] + ["百家樂 3A"] + [f"龍虎 {i}" for i in range(1, 4)]
                 if room_name not in mt_valid:
-                    line_reply(tk, text_with_back("⚠️ MT真人房號格式錯誤\n\n(例如：百家樂1、百家樂3A、百家樂7)"))
+                    line_reply(tk, text_with_back("⚠️ MT真人房號格式錯誤\n\n百家樂：百家樂1~百家樂13、百家樂3A\n龍虎：龍虎1~龍虎3"))
                     continue
+
+                # ── MT真人：嘗試即時牌路 ──
+                _ensure_mt_listener()
+                live = get_live_history(room_name)
+                if live and len(live) >= 3:
+                    # 有足夠即時數據 → 直接顯示 AI 預測
+                    chat_modes[uid] = {"state": "mt_live", "room": room_name, "p": "MT真人"}
+                    try:
+                        big_road_cols = compute_big_road_cols(live)
+                        big_eye, small_r, cockroach = compute_derived_roads(big_road_cols)
+                        total_counts = {"莊": live.count("莊"), "閒": live.count("閒"), "和": live.count("和")}
+                        flex_msg = build_analysis_flex(room_name, live, total_counts)
+                        info = get_live_info(room_name)
+                        shoe = info.get("shoe", "?")
+                        # 加上操作按鈕
+                        footer = {
+                            "type": "box", "layout": "vertical", "spacing": "sm", "paddingAll": "md",
+                            "contents": [
+                                {"type": "button", "action": {"type": "message", "label": "🔄 刷新預測", "text": "刷新"}, "style": "primary", "color": "#2E86C1", "height": "sm"},
+                                {"type": "button", "action": {"type": "message", "label": "✏️ 手動輸入模式", "text": "手動模式"}, "style": "secondary", "height": "sm"},
+                                {"type": "button", "action": {"type": "message", "label": "↩ 返回主選單", "text": "返回主選單"}, "style": "secondary", "height": "sm"}
+                            ]
+                        }
+                        flex_msg["contents"]["footer"] = footer
+                        line_reply(tk, [
+                            sys_bubble(f"🔴 即時連線 {room_name}（靴{shoe}）\n📊 已自動擷取 {len(live)} 局牌路"),
+                            flex_msg
+                        ])
+                    except Exception as e:
+                        print(f"[MT Live] 分析失敗: {e}")
+                        traceback.print_exc()
+                        chat_modes[uid] = {"state": "predicting", "room": room_name}
+                        line_reply(tk, text_with_back(f"⚠️ 即時分析失敗，已切換手動模式\n\n請輸入開牌結果：\n1(閒) 2(莊) 3(和)"))
+                else:
+                    # 數據不足 → fallback 手動模式
+                    chat_modes[uid] = {"state": "predicting", "room": room_name}
+                    live_count = len(live) if live else 0
+                    line_reply(tk, [
+                        sys_bubble(f"🔗 連線中... {room_name}\n⏳ 即時數據累積中（{live_count}局），暫用手動模式"),
+                        text_with_back(f"✅ 已成功連線 {room_name}\n\n請輸入開牌結果：\n1(閒) 2(莊) 3(和)")
+                    ])
+                continue
+            # DG 或其他平台 → 手動模式
             chat_modes[uid] = {"state": "predicting", "room": room_name}
             line_reply(tk, [
                 sys_bubble(f"🔗 連線中... {room_name}"),
                 text_with_back(f"✅ 已成功連線 {room_name}\n\n請輸入開牌結果：\n1(閒) 2(莊) 3(和)")
             ])
             continue
+
+        # ── MT 即時模式：刷新 / 手動切換 ──
+        elif isinstance(mode, dict) and mode.get("state") == "mt_live":
+            room_name = mode["room"]
+            if msg == "刷新":
+                live = get_live_history(room_name)
+                if live and len(live) >= 3:
+                    try:
+                        total_counts = {"莊": live.count("莊"), "閒": live.count("閒"), "和": live.count("和")}
+                        flex_msg = build_analysis_flex(room_name, live, total_counts)
+                        info = get_live_info(room_name)
+                        shoe = info.get("shoe", "?")
+                        footer = {
+                            "type": "box", "layout": "vertical", "spacing": "sm", "paddingAll": "md",
+                            "contents": [
+                                {"type": "button", "action": {"type": "message", "label": "🔄 刷新預測", "text": "刷新"}, "style": "primary", "color": "#2E86C1", "height": "sm"},
+                                {"type": "button", "action": {"type": "message", "label": "✏️ 手動輸入模式", "text": "手動模式"}, "style": "secondary", "height": "sm"},
+                                {"type": "button", "action": {"type": "message", "label": "↩ 返回主選單", "text": "返回主選單"}, "style": "secondary", "height": "sm"}
+                            ]
+                        }
+                        flex_msg["contents"]["footer"] = footer
+                        line_reply(tk, [
+                            sys_bubble(f"🔄 {room_name}（靴{shoe}）| 即時 {len(live)} 局"),
+                            flex_msg
+                        ])
+                    except Exception as e:
+                        line_reply(tk, sys_bubble(f"⚠️ 刷新失敗：{str(e)[:80]}"))
+                else:
+                    line_reply(tk, sys_bubble(f"⏳ {room_name} 數據不足（{len(live) if live else 0}局），請稍後再試"))
+                continue
+            elif msg == "手動模式":
+                chat_modes[uid] = {"state": "predicting", "room": room_name}
+                line_reply(tk, text_with_back(f"✏️ 已切換手動模式 - {room_name}\n\n請輸入開牌結果：\n1(閒) 2(莊) 3(和)"))
+                continue
+            elif msg == "返回主選單":
+                chat_modes.pop(uid, None)
+                profit_tracker.pop(uid, None)
+                send_main_menu(tk)
+                continue
+            else:
+                # 未知指令，提示操作
+                line_reply(tk, sys_bubble(f"📌 {room_name} 即時模式\n\n🔄 點「刷新」獲取最新預測\n✏️ 點「手動模式」切換手動輸入"))
+                continue
 
         elif isinstance(mode, dict) and mode.get("state") == "predicting":
             room = mode["room"]
