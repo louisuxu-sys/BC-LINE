@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+.env
+.git/
+.gitignore
+*.png
+test_*.py
+mt_ws_test.py
+ws_capture/
+debug_*
+node_modules/
+.dockerignore
+Dockerfile
+render.yaml
+README.md

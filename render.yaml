@@ -1,9 +1,7 @@
 services:
   - type: web
     name: sv94-bot
-    runtime: python
-    buildCommand: pip install -r requirements.txt && playwright install chromium && playwright install-deps chromium
-    startCommand: gunicorn sv94:app --bind 0.0.0.0:$PORT
+    runtime: docker
     envVars:
       - key: LINE_ACCESS_TOKEN
         sync: false
@@ -13,5 +11,3 @@ services:
         sync: false
       - key: GR_PASSWORD
         sync: false
-      - key: PYTHON_VERSION
-        value: 3.11.11
