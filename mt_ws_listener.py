@@ -86,29 +86,41 @@ def _on_show_win(body):
 
 
 def _on_tables_response(tables_list):
-    """從 tables 回應初始化各桌的牌路統計"""
+    """從 tables 回應初始化各桌的牌路統計及房間資訊"""
     with _lock:
         for t in tables_list:
             tid = t.get("table_id", "")
             trend = t.get("trend", {})
-            if not tid or not trend:
+            if not tid:
                 continue
-            shoe = trend.get("current_shoe")
-            rnd = trend.get("current_round", "0")
+            shoe = trend.get("current_shoe") if trend else None
+            rnd = trend.get("current_round", "0") if trend else "0"
 
             # 從 bead_plate2 解碼歷史
-            bead = trend.get("bead_plate2", "")
-            if bead and tid not in _table_history:
-                history = _decode_bead_plate(bead)
-                if history:
-                    _table_history[tid] = history
-                    logger.info("[%s] 從 bead_plate2 初始化 %d 局歷史", tid, len(history))
+            if trend:
+                bead = trend.get("bead_plate2", "")
+                if bead and tid not in _table_history:
+                    history = _decode_bead_plate(bead)
+                    if history:
+                        _table_history[tid] = history
+                        logger.info("[%s] 從 bead_plate2 初始化 %d 局歷史", tid, len(history))
 
+            # 儲存完整桌台資訊（供房間選單用）
+            dealer = t.get("dealer", {})
             _table_info[tid] = {
                 "shoe": shoe,
                 "round": rnd,
                 "last_update": time.time(),
+                "table_name": t.get("table_name", ""),
+                "dealer_name": dealer.get("username", "未知") if isinstance(dealer, dict) else "未知",
+                "total_players": int(t.get("totalplayers", 0)),
+                "banker_wins": trend.get("total_round_banker", "0") if trend else "0",
+                "player_wins": trend.get("total_round_player", "0") if trend else "0",
+                "tie_count": trend.get("total_round_tie", "0") if trend else "0",
+                "hall": t.get("hall", 0),
+                "state": t.get("state", 0),
             }
+        logger.info("[tables] 已更新 %d 張桌台資訊", len(tables_list))
 
 
 def _decode_bead_plate(bead_str):
@@ -276,6 +288,50 @@ def stop_listener():
 def is_listener_running():
     """檢查監聽是否在運行"""
     return _listener_running and _listener_thread and _listener_thread.is_alive()
+
+
+# ── 房間數據查詢（取代 mt_rooms.py 的 Playwright 呼叫）──
+
+TABLE_CATEGORY = {
+    "BAG01": "中文廳", "BAG02": "中文廳", "BAG03": "中文廳",
+    "BAG05": "中文廳", "BAG06": "中文廳", "BAG07": "中文廳",
+    "BAG08": "中文廳", "BAG09": "中文廳", "BAG10": "中文廳",
+    "BAG11": "中文廳", "BAG12": "中文廳", "BAG13": "中文廳",
+    "BAG03A": "亞洲廳",
+    "DTG01": "龍虎", "DTG02": "龍虎", "DTG03": "龍虎",
+    "NUG01": "牛牛", "SBG01": "骰寶",
+}
+
+
+def get_room_data(table_id):
+    """取得單桌的完整房間資訊"""
+    with _lock:
+        return dict(_table_info.get(table_id, {}))
+
+
+def get_rooms_by_category(category):
+    """取得指定類別的所有房間（從 Listener 快取）"""
+    with _lock:
+        rooms = []
+        for tid, info in _table_info.items():
+            cat = TABLE_CATEGORY.get(tid, "其他")
+            if cat == category and info.get("table_name"):
+                rooms.append({
+                    "table_id": tid,
+                    "category": cat,
+                    **info,
+                })
+        return rooms
+
+
+def get_all_room_data():
+    """取得所有桌台的房間資訊"""
+    with _lock:
+        return [
+            {"table_id": tid, "category": TABLE_CATEGORY.get(tid, "其他"), **info}
+            for tid, info in _table_info.items()
+            if info.get("table_name")
+        ]
 
 
 # ── 桌台 ID 對應顯示名稱 ──

@@ -14,39 +14,14 @@ from collections import Counter
 
 app = Flask(__name__)
 
-# --- MT 即時房間數據 ---
-_mt_rooms_cache = []  # 快取的房間列表
-_mt_rooms_lock = threading.Lock()
-
-def _refresh_mt_rooms_bg():
-    """背景執行緒取得 MT 房間數據"""
-    global _mt_rooms_cache
-    try:
-        from mt_rooms import get_mt_rooms_sync
-        rooms = get_mt_rooms_sync()
-        if rooms:
-            with _mt_rooms_lock:
-                _mt_rooms_cache = rooms
-            print(f"[MT] 房間數據已更新: {len(rooms)} 桌")
-    except Exception as e:
-        print(f"[MT] 房間數據更新失敗: {e}")
-
-def get_cached_mt_rooms():
-    """取得快取的 MT 房間數據"""
-    with _mt_rooms_lock:
-        return list(_mt_rooms_cache)
-
-def refresh_mt_rooms_async():
-    """非阻塞更新 MT 房間數據"""
-    t = threading.Thread(target=_refresh_mt_rooms_bg, daemon=True)
-    t.start()
-
-# --- MT 即時牌路追蹤 ---
+# --- MT 即時牌路追蹤 + 房間數據（全部從 Listener 取，不再用 mt_rooms.py 的 Playwright）---
 from mt_ws_listener import (
     start_listener as _start_mt_listener,
     get_table_history, get_table_info, is_listener_running,
     DISPLAY_TO_TABLE, TABLE_DISPLAY_MAP,
     display_to_table_id, table_id_to_display,
+    get_rooms_by_category as _get_mt_rooms_by_category,
+    get_all_room_data as _get_all_mt_rooms,
 )
 
 def _ensure_mt_listener():
@@ -1268,9 +1243,8 @@ def webhook():
             p_name = "MT真人" if "MT" in msg else "DG真人"
             if "MT" in msg:
                 chat_modes[uid] = {"state": "mt_choose_category", "p": p_name}
-                # 提前觸發背景更新房間數據
-                if not get_cached_mt_rooms():
-                    refresh_mt_rooms_async()
+                # 確保監聽器運行中（房間數據從 Listener 取）
+                _ensure_mt_listener()
                 BASE_URL = "https://bc-line-kmh9.onrender.com"
                 cat_flex = {
                     "type": "flex", "altText": "MT真人 - 選擇遊戲廳",
@@ -1303,12 +1277,9 @@ def webhook():
             category = msg.replace("MT廳:", "")
             chat_modes[uid] = {"state": "choose_room", "p": "MT真人"}
 
-            # 取得即時房間數據
-            live_rooms = get_cached_mt_rooms()
-            # 按類別篩選
-            cat_map = {"中文廳": "中文廳", "亞洲廳": "亞洲廳", "龍虎": "龍虎"}
-            target_cat = cat_map.get(category, category)
-            cat_rooms = [r for r in live_rooms if r.get("category") == target_cat] if live_rooms else []
+            # 取得即時房間數據（直接從 Listener 快取）
+            _ensure_mt_listener()
+            cat_rooms = _get_mt_rooms_by_category(category)
 
             # 顏色設定
             color_map = {"中文廳": "#2E86C1", "亞洲廳": "#1A5276", "龍虎": "#D4AC0D"}
@@ -1389,8 +1360,6 @@ def webhook():
                     }
                 }
                 line_reply(tk, room_flex)
-                # 觸發背景更新，下次就有即時數據
-                refresh_mt_rooms_async()
             continue
 
         elif isinstance(mode, dict) and mode.get("state") == "choose_room":
