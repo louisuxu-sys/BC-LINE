@@ -65,6 +65,7 @@ async def _dismiss_popups(page, stage=""):
 
 async def _fetch_mt_token_playwright():
     """用 Playwright 自動登入平台並取得 MT token"""
+    os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", "/opt/render/.cache/pw-browsers")
     from playwright.async_api import async_playwright
 
     platform_url = os.getenv("GR_PLATFORM_URL", "https://seofufan.seogrwin1688.com/")

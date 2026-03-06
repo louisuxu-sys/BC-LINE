@@ -80,6 +80,7 @@ def _parse_table(t):
 
 async def _fetch_rooms_playwright():
     """用 Playwright 開啟 MT 頁面，攔截 WS 取得桌台列表"""
+    os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", "/opt/render/.cache/pw-browsers")
     from playwright.async_api import async_playwright
     from mt_token import get_mt_token
 

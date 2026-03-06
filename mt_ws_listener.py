@@ -139,8 +139,10 @@ def _decode_bead_plate(bead_str):
 
 
 async def _run_listener():
-    """主監聽迴圈：開啟 MT 頁面，長駐監聽 WS 事件"""
+    """主監聽迴圈：開啟 MT 頁面，長駐監聯 WS 事件"""
     global _listener_running
+    import os as _os
+    _os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", "/opt/render/.cache/pw-browsers")
     from playwright.async_api import async_playwright
     from mt_token import get_mt_token
 
