@@ -200,7 +200,7 @@ async def _run_listener():
                 )
                 _log("Step2 OK: WS 已連線")
 
-                # ---- Step3: 認證 + 請求桌台資料 ----
+                # ---- Step3: 認證 ----
                 auth_msg = {
                     "method": "POST",
                     "action": {"name": "/api/v1/authenticate"},
@@ -209,16 +209,58 @@ async def _run_listener():
                 await ws.send(json.dumps(auth_msg))
                 _log("Step3: 已發送 authenticate")
 
-                # 請求桌台資料（百家樂 room_id=1）
-                tables_msg = {
+                # 等待認證回應（最多讀 10 條訊息）
+                auth_ok = False
+                for _i in range(10):
+                    try:
+                        raw = await asyncio.wait_for(ws.recv(), timeout=10)
+                        if isinstance(raw, tuple): raw = raw[0]
+                        if isinstance(raw, bytes): raw = raw.decode("utf-8", errors="replace")
+                        data = json.loads(raw)
+                        action = data.get("action", "")
+                        aname = action.get("name", "") if isinstance(action, dict) else str(action)
+                        _log(f"AUTH_WAIT#{_i}: action={aname[:80]} err={data.get('err','')}")
+                        if "authenticate" in aname:
+                            err = data.get("err", "")
+                            if err:
+                                _log(f"認證失敗: {err}，重新取 token...")
+                                from mt_token import get_mt_token as _refresh_token
+                                token = await _refresh_token(force_refresh=True)
+                                break
+                            auth_ok = True
+                            _log("✅ 認證成功")
+                            break
+                    except asyncio.TimeoutError:
+                        _log("等待認證回應超時")
+                        break
+                    except Exception:
+                        continue
+
+                if not auth_ok:
+                    _log("認證未確認，仍嘗試發送 tables 請求...")
+
+                # ---- Step4: 請求桌台資料（所有廳）----
+                for room_id in [1, 2, 3]:
+                    tables_msg = {
+                        "method": "GET",
+                        "action": {
+                            "name": "/api/v1/gametype/*/game/*/room/*/tables",
+                            "data": {"gametype_id": 3, "game_id": 1, "room_id": room_id}
+                        }
+                    }
+                    await ws.send(json.dumps(tables_msg))
+                _log("Step4: 已發送 tables 請求 (room 1,2,3)")
+
+                # 也請求龍虎
+                dt_msg = {
                     "method": "GET",
                     "action": {
                         "name": "/api/v1/gametype/*/game/*/room/*/tables",
-                        "data": {"gametype_id": 3, "game_id": 1, "room_id": 1}
+                        "data": {"gametype_id": 3, "game_id": 2, "room_id": 1}
                     }
                 }
-                await ws.send(json.dumps(tables_msg))
-                _log("Step3: 已發送 tables 請求")
+                await ws.send(json.dumps(dt_msg))
+                _log("Step4: 已發送龍虎 tables 請求")
 
                 _log("✅ WS 已連線，開始監聽即時開牌")
                 reconnect_delay = 10
@@ -254,13 +296,13 @@ async def _run_listener():
                     try:
                         data = json.loads(msg_text)
                     except (json.JSONDecodeError, TypeError):
-                        if msg_count <= 20:
+                        if msg_count <= 50:
                             _log(f"MSG#{msg_count} JSON解析失敗: {str(msg_text)[:200]}")
                         continue
 
-                    # 前 20 條訊息記錄 action 結構（診斷用）
+                    # 前 50 條訊息記錄 action 結構（診斷用）
                     action = data.get("action", "")
-                    if msg_count <= 20:
+                    if msg_count <= 50:
                         _log(f"MSG#{msg_count} action={json.dumps(action, ensure_ascii=False)[:120]} keys={list(data.keys())}")
 
                     if isinstance(action, dict):
