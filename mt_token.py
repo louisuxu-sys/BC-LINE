@@ -60,7 +60,14 @@ async def _dismiss_popups(page, stage=""):
             break
 
     logger.info("[%s] 公告彈窗處理完成，共關閉 %d 個", stage, dismissed)
-    await page.screenshot(path=f"debug_{stage}_after_dismiss.png")
+
+
+async def _safe_screenshot(page, path):
+    """Safe screenshot that won't crash on timeout (Render headless)"""
+    try:
+        await page.screenshot(path=path, timeout=5000)
+    except Exception:
+        pass
 
 
 async def _fetch_mt_token_playwright():
@@ -96,7 +103,7 @@ async def _fetch_mt_token_playwright():
         await page.wait_for_timeout(2000)
 
         # ── 2. 關閉可能的公告彈窗（登入前） ──
-        await page.screenshot(path="debug_01_before_dismiss.png")
+        await _safe_screenshot(page, "debug_01_before_dismiss.png")
         await _dismiss_popups(page, "登入前")
 
         # ── 3. 登入 ──
@@ -132,9 +139,9 @@ async def _fetch_mt_token_playwright():
 
         if not account_sel or not pwd_sel:
             # 截圖輔助 debug
-            await page.screenshot(path="debug_login_page.png")
+            await _safe_screenshot(page, "debug_login_page.png")
             await browser.close()
-            raise RuntimeError("找不到帳號或密碼輸入框，已截圖 debug_login_page.png")
+            raise RuntimeError("找不到帳號或密碼輸入框")
 
         await page.fill(account_sel, username)
         await page.fill(pwd_sel, password)
@@ -154,9 +161,9 @@ async def _fetch_mt_token_playwright():
                 break
 
         if not login_btn:
-            await page.screenshot(path="debug_login_btn.png")
+            await _safe_screenshot(page, "debug_login_btn.png")
             await browser.close()
-            raise RuntimeError("找不到登入按鈕，已截圖 debug_login_btn.png")
+            raise RuntimeError("找不到登入按鈕")
 
         # 使用 JavaScript 點擊來避免遮罩阻擋
         btn_el = await page.query_selector(login_btn)
@@ -166,7 +173,7 @@ async def _fetch_mt_token_playwright():
             await page.click(login_btn)
         logger.info("已點擊登入按鈕，等待登入完成...")
         await page.wait_for_timeout(5000)
-        await page.screenshot(path="debug_03_after_login.png")
+        await _safe_screenshot(page, "debug_03_after_login.png")
 
         # ── 4. 關閉登入後的公告彈窗（最新公告 1/3, 2/3, 3/3） ──
         await _dismiss_popups(page, "登入後")
@@ -247,7 +254,7 @@ async def _fetch_mt_token_playwright():
             logger.warning("點擊真人視訊失敗: %s", e)
 
         await page.wait_for_timeout(3000)
-        await page.screenshot(path="debug_05_after_live.png")
+        await _safe_screenshot(page, "debug_05_after_live.png")
 
         # ── 7. 點擊「MT真人」遊戲卡片 ──
         logger.info("嘗試點擊「MT真人」遊戲...")
@@ -288,7 +295,7 @@ async def _fetch_mt_token_playwright():
         if mt_clicked:
             logger.info("已透過 JS 點擊「MT真人」")
         else:
-            await page.screenshot(path="debug_06_mt_btn.png")
+            await _safe_screenshot(page, "debug_06_mt_btn.png")
             logger.warning("JS 精確匹配未找到 MT真人，嘗試其他方法...")
             # 方法2：用 Playwright locator
             try:
@@ -301,12 +308,12 @@ async def _fetch_mt_token_playwright():
                 pass
 
         if not mt_clicked:
-            await page.screenshot(path="debug_07_no_mt.png")
+            await _safe_screenshot(page, "debug_07_no_mt.png")
             await browser.close()
-            raise RuntimeError("找不到 MT真人 按鈕，已截圖 debug_07_no_mt.png")
+            raise RuntimeError("找不到 MT真人 按鈕")
 
         await page.wait_for_timeout(3000)
-        await page.screenshot(path="debug_08_after_mt_click.png")
+        await _safe_screenshot(page, "debug_08_after_mt_click.png")
 
         # ── 8. 等待 token（從新視窗或 API 回應） ──
         try:
@@ -324,9 +331,12 @@ async def _fetch_mt_token_playwright():
                     break
 
             if not token:
-                await page.screenshot(path="debug_no_token.png")
+                try:
+                    await page.screenshot(path="debug_no_token.png", timeout=5000)
+                except Exception:
+                    pass  # 截圖失敗不影響錯誤回報
                 await browser.close()
-                raise RuntimeError("無法取得 MT Token（超時），已截圖 debug_no_token.png")
+                raise RuntimeError("無法取得 MT Token（超時）")
 
         await browser.close()
 
