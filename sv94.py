@@ -1233,45 +1233,46 @@ def webhook():
                 line_reply(tk, cat_flex)
             else:
                 chat_modes[uid] = {"state": "choose_room", "p": p_name}
-                line_reply(tk, text_with_back(f"✅ 已選擇 {p_name}\n\n請輸入房號：\n百家樂：RB01~RB07\n性感百家樂：S01~S07"))
+                BASE_URL = "https://bc-line-kmh9.onrender.com"
+                rb_buttons = [{"type": "button", "action": {"type": "message", "label": f"RB0{i}", "text": f"RB0{i}"}, "style": "primary", "color": "#2E86C1", "height": "sm"} for i in range(1, 8)]
+                s_buttons = [{"type": "button", "action": {"type": "message", "label": f"S0{i}", "text": f"S0{i}"}, "style": "primary", "color": "#8E44AD", "height": "sm"} for i in range(1, 8)]
+                dg_flex = {
+                    "type": "flex", "altText": "DG真人 - 選擇房間",
+                    "contents": {
+                        "type": "bubble", "size": "mega",
+                        "header": {"type": "box", "layout": "vertical", "backgroundColor": "#1A5276", "paddingAll": "md", "contents": [
+                            {"type": "box", "layout": "horizontal", "contents": [
+                                {"type": "image", "url": f"{BASE_URL}/static/DG.jpg", "size": "xxs", "aspectRatio": "1:1", "aspectMode": "cover", "flex": 0},
+                                {"type": "box", "layout": "vertical", "flex": 4, "paddingStart": "md", "contents": [
+                                    {"type": "text", "text": "DG真人", "color": "#ffffff", "weight": "bold", "size": "lg"},
+                                    {"type": "text", "text": "請選擇房間或直接輸入房號", "color": "#AED6F1", "size": "xs"}
+                                ]}
+                            ]}
+                        ]},
+                        "body": {"type": "box", "layout": "vertical", "spacing": "sm", "paddingAll": "md", "contents": [
+                            {"type": "text", "text": "🎲 百家樂", "weight": "bold", "size": "sm", "color": "#2E86C1"},
+                        ] + rb_buttons + [
+                            {"type": "separator", "margin": "md"},
+                            {"type": "text", "text": "💃 性感百家樂", "weight": "bold", "size": "sm", "color": "#8E44AD", "margin": "md"},
+                        ] + s_buttons + [
+                            {"type": "button", "action": {"type": "message", "label": "↩ 返回主選單", "text": "返回主選單"}, "style": "secondary", "height": "sm"}
+                        ]}
+                    }
+                }
+                line_reply(tk, dg_flex)
             continue
 
         elif isinstance(mode, dict) and mode.get("state") == "mt_choose_category" and msg.startswith("MT廳:"):
             category = msg.replace("MT廳:", "")
             chat_modes[uid] = {"state": "choose_room", "p": "MT真人"}
 
-            # 顏色設定
-            color_map = {"亞洲廳": "#2E86C1", "國際廳": "#1A5276"}
-            header_color = color_map.get(category, "#2E86C1")
-            emoji = "🎲"
-
-            # ── 靜態房間列表 ──
+            # ── 房間選擇 ──
             if category == "亞洲廳":
-                hint = [{"type": "text", "text": "💡 可直接輸入房號，如：百家樂5", "size": "xxs", "color": "#888888", "align": "center", "wrap": True, "margin": "none"}]
-                row1 = [{"type": "button", "action": {"type": "message", "label": f"百家樂{i}", "text": f"百家樂{i}"}, "style": "primary", "color": "#2E86C1", "height": "sm"} for i in range(1, 6)]
-                row2 = [{"type": "button", "action": {"type": "message", "label": f"百家樂{i}", "text": f"百家樂{i}"}, "style": "primary", "color": "#2E86C1", "height": "sm"} for i in range(6, 14)]
-                body_items = hint + row1 + row2 + [
-                    {"type": "button", "action": {"type": "message", "label": "百家樂3A", "text": "百家樂3A"}, "style": "secondary", "height": "sm"},
-                    {"type": "button", "action": {"type": "message", "label": "↩ 返回主選單", "text": "返回主選單"}, "style": "secondary", "height": "sm"}
-                ]
+                line_reply(tk, text_with_back(f"🎲 MT真人 - 亞洲廳\n\n請輸入房號：\n百家樂1~百家樂13、百家樂3A"))
             elif category == "國際廳":
-                body_items = [
-                    {"type": "text", "text": "🚧 國際廳即將開放，敬請期待！", "size": "sm", "color": "#888888", "align": "center", "wrap": True},
-                    {"type": "button", "action": {"type": "message", "label": "↩ 返回主選單", "text": "返回主選單"}, "style": "secondary", "height": "sm"}
-                ]
+                line_reply(tk, text_with_back("🚧 國際廳即將開放，敬請期待！"))
             else:
-                body_items = [{"type": "button", "action": {"type": "message", "label": "↩ 返回主選單", "text": "返回主選單"}, "style": "secondary", "height": "sm"}]
-            room_flex = {
-                "type": "flex", "altText": f"MT{category} - 選擇房間",
-                "contents": {
-                    "type": "bubble", "size": "mega",
-                    "header": {"type": "box", "layout": "vertical", "backgroundColor": header_color, "paddingAll": "sm", "contents": [
-                        {"type": "text", "text": f"{emoji} MT真人 - {category}", "color": "#ffffff", "weight": "bold", "size": "md", "align": "center"}
-                    ]},
-                    "body": {"type": "box", "layout": "vertical", "spacing": "sm", "paddingAll": "md", "contents": body_items}
-                }
-            }
-            line_reply(tk, room_flex)
+                line_reply(tk, text_with_back("⚠️ 未知遊戲廳"))
             continue
 
         elif isinstance(mode, dict) and mode.get("state") == "choose_room":
