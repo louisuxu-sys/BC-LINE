@@ -377,15 +377,16 @@ async def _run_listener():
                     mt_page = await context.new_page()
                     await mt_page.goto(mt_url, wait_until="domcontentloaded", timeout=60000)
 
-                _log(f"Step4a: MT 頁面 URL={mt_page.url[:60]}")
+                _log(f"Step4a: MT 頁面 URL={mt_page.url[:80]}")
 
                 ws_connected = asyncio.Event()
                 ws_closed = asyncio.Event()
 
                 def on_ws(ws):
-                    if "game/ws" not in ws.url:
+                    _log(f"WS 偵測到: {ws.url[:80]}")
+                    if "game/ws" not in ws.url and "/ws" not in ws.url:
                         return
-                    _log(f"WS 已連線: {ws.url[:60]}")
+                    _log(f"✅ 目標 WS 已連線: {ws.url[:80]}")
                     ws_connected.set()
 
                     def on_frame(payload):
@@ -415,17 +416,50 @@ async def _run_listener():
 
                 mt_page.on("websocket", on_ws)
 
-                # 如果頁面已經有 WS，重新載入以觸發事件
+                # 捕捉 JS console 錯誤
+                def on_console(msg):
+                    if msg.type in ("error", "warning"):
+                        _log(f"JS {msg.type}: {msg.text[:120]}")
+                mt_page.on("console", on_console)
+
+                # 重新載入觸發 WS
+                _log("Step4b: reload 頁面觸發 WS...")
                 await mt_page.reload(wait_until="domcontentloaded", timeout=60000)
-                _log("Step4b: 頁面已載入，等待 WS...")
-                await asyncio.sleep(5)
+                await asyncio.sleep(8)
+
+                # 如果 WS 沒連上，檢查頁面 JS 中的 WebSocket 狀態
+                if not ws_connected.is_set():
+                    ws_check = await mt_page.evaluate('''() => {
+                        const result = {url: document.URL, wsCount: 0, wsUrls: []};
+                        // Check if page has any performance entries for websockets
+                        if (window.performance) {
+                            const entries = performance.getEntriesByType("resource");
+                            for (const e of entries) {
+                                if (e.name.includes("ws")) {
+                                    result.wsUrls.push(e.name);
+                                    result.wsCount++;
+                                }
+                            }
+                        }
+                        return result;
+                    }''')
+                    _log(f"Step4c: 頁面狀態: {ws_check}")
 
                 try:
-                    await asyncio.wait_for(ws_connected.wait(), timeout=30)
+                    await asyncio.wait_for(ws_connected.wait(), timeout=25)
                 except asyncio.TimeoutError:
-                    _log("等待 WS 連線超時 30s")
-                    await browser.close()
-                    continue
+                    _log("等待 WS 連線超時")
+                    # 試試直接 goto 而不是 reload
+                    _log("Step4d: 嘗試直接 goto MT URL...")
+                    mt_url2 = f"https://gsa.ofalive99.net/?token={token}&lang=zhtw"
+                    await mt_page.goto(mt_url2, wait_until="domcontentloaded", timeout=60000)
+                    await asyncio.sleep(8)
+                    try:
+                        await asyncio.wait_for(ws_connected.wait(), timeout=25)
+                    except asyncio.TimeoutError:
+                        _log("第二次等待 WS 仍超時，放棄本次")
+                        await browser.close()
+                        continue
 
                 _log("✅ WS 已連線，開始監聽即時開牌")
                 reconnect_delay = 10  # 成功連線後重置
