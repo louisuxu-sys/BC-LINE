@@ -14,51 +14,7 @@ from collections import Counter
 
 app = Flask(__name__)
 
-# --- 啟動診斷 ---
 print("[BOOT] sv94.py 模組載入中...", flush=True)
-try:
-    import curl_cffi
-    print(f"[BOOT] curl_cffi 版本: {curl_cffi.__version__}", flush=True)
-except ImportError as e:
-    print(f"[BOOT] ⚠️ curl_cffi 無法 import: {e}", flush=True)
-except Exception as e:
-    print(f"[BOOT] curl_cffi 檢查異常: {e}", flush=True)
-
-# --- MT 即時牌路追蹤 + 房間數據 ---
-from mt_ws_listener import (
-    start_listener as _start_mt_listener,
-    get_table_history, get_table_info, is_listener_running,
-    DISPLAY_TO_TABLE, TABLE_DISPLAY_MAP,
-    display_to_table_id, table_id_to_display,
-    get_rooms_by_category as _get_mt_rooms_by_category,
-    get_all_room_data as _get_all_mt_rooms,
-)
-
-def _ensure_mt_listener():
-    """確保 MT 監聽器在運行"""
-    if not is_listener_running():
-        try:
-            _start_mt_listener()
-            print("[MT] 啟動即時牌路監聽器")
-        except Exception as e:
-            print(f"[MT] 啟動監聽器失敗: {e}")
-
-def get_live_history(room_display_name):
-    """用房間顯示名稱取得即時牌路歷史
-    room_display_name: 如 '百家樂 1', '龍虎 3'
-    回傳: list of '莊'/'閒'/'和' 或 []
-    """
-    tid = display_to_table_id(room_display_name)
-    if not tid:
-        return []
-    return get_table_history(tid)
-
-def get_live_info(room_display_name):
-    """取得即時桌台資訊"""
-    tid = display_to_table_id(room_display_name)
-    if not tid:
-        return {}
-    return get_table_info(tid)
 
 # --- 基礎配置 ---
 LINE_ACCESS_TOKEN = os.environ.get("LINE_ACCESS_TOKEN", "Y6KHkjxZnW9I0pbDV6ogI3A0/+USC4q2+bnnTgBrG9A/WT7Hm8dpLGmviC4jNM3mk186VYBkyAag7wFqYMXE92fJXSvUm/xFCmjOdDm0rPZ0+dnnBNMYR7Kpj5xmsBslD4e+BlFjOTfXrlILdXdRTAdB04t89/1O/w1cDnyilFU=")
@@ -1253,8 +1209,6 @@ def webhook():
             p_name = "MT真人" if "MT" in msg else "DG真人"
             if "MT" in msg:
                 chat_modes[uid] = {"state": "mt_choose_category", "p": p_name}
-                # 確保監聽器運行中（房間數據從 Listener 取）
-                _ensure_mt_listener()
                 BASE_URL = "https://bc-line-kmh9.onrender.com"
                 cat_flex = {
                     "type": "flex", "altText": "MT真人 - 選擇遊戲廳",
@@ -1287,9 +1241,7 @@ def webhook():
             category = msg.replace("MT廳:", "")
             chat_modes[uid] = {"state": "choose_room", "p": "MT真人"}
 
-            # 取得即時房間數據（直接從 Listener 快取）
-            _ensure_mt_listener()
-            cat_rooms = _get_mt_rooms_by_category(category)
+            cat_rooms = None  # 即時數據已停用，直接使用靜態列表
 
             # 顏色設定
             color_map = {"中文廳": "#2E86C1", "亞洲廳": "#1A5276", "龍虎": "#D4AC0D"}
@@ -1387,46 +1339,9 @@ def webhook():
                     line_reply(tk, text_with_back("⚠️ MT真人房號格式錯誤\n\n百家樂：百家樂1~百家樂13、百家樂3A\n龍虎：龍虎1~龍虎3"))
                     continue
 
-                # ── MT真人：嘗試即時牌路 ──
-                _ensure_mt_listener()
-                live = get_live_history(room_name)
-                if live and len(live) >= 3:
-                    # 有足夠即時數據 → 直接顯示 AI 預測
-                    chat_modes[uid] = {"state": "mt_live", "room": room_name, "p": "MT真人"}
-                    try:
-                        big_road_cols = compute_big_road_cols(live)
-                        big_eye, small_r, cockroach = compute_derived_roads(big_road_cols)
-                        total_counts = {"莊": live.count("莊"), "閒": live.count("閒"), "和": live.count("和")}
-                        flex_msg = build_analysis_flex(room_name, live, total_counts)
-                        info = get_live_info(room_name)
-                        shoe = info.get("shoe", "?")
-                        # 加上操作按鈕
-                        footer = {
-                            "type": "box", "layout": "vertical", "spacing": "sm", "paddingAll": "md",
-                            "contents": [
-                                {"type": "button", "action": {"type": "message", "label": "🔄 刷新預測", "text": "刷新"}, "style": "primary", "color": "#2E86C1", "height": "sm"},
-                                {"type": "button", "action": {"type": "message", "label": "✏️ 手動輸入模式", "text": "手動模式"}, "style": "secondary", "height": "sm"},
-                                {"type": "button", "action": {"type": "message", "label": "↩ 返回主選單", "text": "返回主選單"}, "style": "secondary", "height": "sm"}
-                            ]
-                        }
-                        flex_msg["contents"]["footer"] = footer
-                        line_reply(tk, [
-                            sys_bubble(f"🔴 即時連線 {room_name}（靴{shoe}）\n📊 已自動擷取 {len(live)} 局牌路"),
-                            flex_msg
-                        ])
-                    except Exception as e:
-                        print(f"[MT Live] 分析失敗: {e}")
-                        traceback.print_exc()
-                        chat_modes[uid] = {"state": "predicting", "room": room_name}
-                        line_reply(tk, text_with_back(f"⚠️ 即時分析失敗，已切換手動模式\n\n請輸入開牌結果：\n1(閒) 2(莊) 3(和)"))
-                else:
-                    # 數據不足 → fallback 手動模式
-                    chat_modes[uid] = {"state": "predicting", "room": room_name}
-                    live_count = len(live) if live else 0
-                    line_reply(tk, [
-                        sys_bubble(f"🔗 連線中... {room_name}\n⏳ 即時數據累積中（{live_count}局），暫用手動模式"),
-                        text_with_back(f"✅ 已成功連線 {room_name}\n\n請輸入開牌結果：\n1(閒) 2(莊) 3(和)")
-                    ])
+                # ── MT真人：手動輸入模式 ──
+                chat_modes[uid] = {"state": "predicting", "room": room_name}
+                line_reply(tk, text_with_back(f"✅ 已選擇 {room_name}\n\n請輸入開牌結果：\n1(閒) 2(莊) 3(和)"))
                 continue
             # DG 或其他平台 → 手動模式
             chat_modes[uid] = {"state": "predicting", "room": room_name}
@@ -1435,49 +1350,6 @@ def webhook():
                 text_with_back(f"✅ 已成功連線 {room_name}\n\n請輸入開牌結果：\n1(閒) 2(莊) 3(和)")
             ])
             continue
-
-        # ── MT 即時模式：刷新 / 手動切換 ──
-        elif isinstance(mode, dict) and mode.get("state") == "mt_live":
-            room_name = mode["room"]
-            if msg == "刷新":
-                live = get_live_history(room_name)
-                if live and len(live) >= 3:
-                    try:
-                        total_counts = {"莊": live.count("莊"), "閒": live.count("閒"), "和": live.count("和")}
-                        flex_msg = build_analysis_flex(room_name, live, total_counts)
-                        info = get_live_info(room_name)
-                        shoe = info.get("shoe", "?")
-                        footer = {
-                            "type": "box", "layout": "vertical", "spacing": "sm", "paddingAll": "md",
-                            "contents": [
-                                {"type": "button", "action": {"type": "message", "label": "🔄 刷新預測", "text": "刷新"}, "style": "primary", "color": "#2E86C1", "height": "sm"},
-                                {"type": "button", "action": {"type": "message", "label": "✏️ 手動輸入模式", "text": "手動模式"}, "style": "secondary", "height": "sm"},
-                                {"type": "button", "action": {"type": "message", "label": "↩ 返回主選單", "text": "返回主選單"}, "style": "secondary", "height": "sm"}
-                            ]
-                        }
-                        flex_msg["contents"]["footer"] = footer
-                        line_reply(tk, [
-                            sys_bubble(f"🔄 {room_name}（靴{shoe}）| 即時 {len(live)} 局"),
-                            flex_msg
-                        ])
-                    except Exception as e:
-                        line_reply(tk, sys_bubble(f"⚠️ 刷新失敗：{str(e)[:80]}"))
-                else:
-                    line_reply(tk, sys_bubble(f"⏳ {room_name} 數據不足（{len(live) if live else 0}局），請稍後再試"))
-                continue
-            elif msg == "手動模式":
-                chat_modes[uid] = {"state": "predicting", "room": room_name}
-                line_reply(tk, text_with_back(f"✏️ 已切換手動模式 - {room_name}\n\n請輸入開牌結果：\n1(閒) 2(莊) 3(和)"))
-                continue
-            elif msg == "返回主選單":
-                chat_modes.pop(uid, None)
-                profit_tracker.pop(uid, None)
-                send_main_menu(tk)
-                continue
-            else:
-                # 未知指令，提示操作
-                line_reply(tk, sys_bubble(f"📌 {room_name} 即時模式\n\n🔄 點「刷新」獲取最新預測\n✏️ 點「手動模式」切換手動輸入"))
-                continue
 
         elif isinstance(mode, dict) and mode.get("state") == "predicting":
             room = mode["room"]
@@ -1579,34 +1451,14 @@ def webhook():
 @app.route("/", methods=["GET"])
 @app.route("/health", methods=["GET"])
 def health():
-    from mt_ws_listener import get_all_tables, is_listener_running
-    tables = get_all_tables()
     return jsonify({
         "status": "ok",
-        "service": "sv94-bot",
-        "mt_listener": is_listener_running(),
-        "mt_tables": len(tables),
-        "mt_table_ids": tables[:5] if tables else []
+        "service": "sv94-bot"
     })
 
 # gunicorn 啟動時也需要載入資料
 user_access_data = load_data(USER_DATA_FILE)
 time_cards_data = load_data(TIME_CARDS_FILE, {"active_cards": {}, "used_cards": {}})
-
-# 延遲啟動 MT 監聽器（讓 gunicorn worker 先完成啟動，避免被 SIGTERM）
-def _delayed_listener_start():
-    import time as _t
-    print("[MT] 延遲啟動計時開始 (10s)...", flush=True)
-    _t.sleep(10)
-    print("[MT] 延遲結束，準備啟動監聽器...", flush=True)
-    try:
-        _ensure_mt_listener()
-        print("[MT] 即時牌路監聽器已延遲啟動", flush=True)
-    except Exception as e:
-        import traceback as _tb2
-        print(f"[MT] 監聯器啟動失敗: {e}\n{_tb2.format_exc()}", flush=True)
-
-threading.Thread(target=_delayed_listener_start, daemon=True).start()
 
 if __name__ == "__main__":
     print("=== SV94 Bot 啟動成功 (port 5001) ===")
