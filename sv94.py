@@ -1224,9 +1224,8 @@ def webhook():
                             ]}
                         ]},
                         "body": {"type": "box", "layout": "vertical", "spacing": "sm", "paddingAll": "lg", "contents": [
-                            {"type": "button", "action": {"type": "message", "label": "🎲 百家樂 - 中文廳", "text": "MT廳:中文廳"}, "style": "primary", "color": "#2E86C1", "height": "sm"},
                             {"type": "button", "action": {"type": "message", "label": "🎲 百家樂 - 亞洲廳", "text": "MT廳:亞洲廳"}, "style": "primary", "color": "#2E86C1", "height": "sm"},
-                            {"type": "button", "action": {"type": "message", "label": "🐉 龍虎", "text": "MT廳:龍虎"}, "style": "primary", "color": "#D4AC0D", "height": "sm"},
+                            {"type": "button", "action": {"type": "message", "label": "🎲 百家樂 - 國際廳（敬請期待）", "text": "MT廳:國際廳"}, "style": "secondary", "height": "sm"},
                             {"type": "button", "action": {"type": "message", "label": "↩ 返回主選單", "text": "返回主選單"}, "style": "secondary", "height": "sm"}
                         ]}
                     }
@@ -1241,87 +1240,37 @@ def webhook():
             category = msg.replace("MT廳:", "")
             chat_modes[uid] = {"state": "choose_room", "p": "MT真人"}
 
-            cat_rooms = None  # 即時數據已停用，直接使用靜態列表
-
             # 顏色設定
-            color_map = {"中文廳": "#2E86C1", "亞洲廳": "#1A5276", "龍虎": "#D4AC0D"}
+            color_map = {"亞洲廳": "#2E86C1", "國際廳": "#1A5276"}
             header_color = color_map.get(category, "#2E86C1")
-            emoji_map = {"中文廳": "🎲", "亞洲廳": "🎲", "龍虎": "🐉"}
-            emoji = emoji_map.get(category, "🎲")
+            emoji = "🎲"
 
-            if cat_rooms:
-                # ── 有即時數據：顯示每桌的荷官、人數、統計 ──
-                room_items = []
-                for r in cat_rooms:
-                    tid = r["table_id"]
-                    tname = r.get("table_name", "")
-                    dealer = r.get("dealer_name", "?")
-                    players = r.get("total_players", 0)
-                    shoe = r.get("current_shoe", "?")
-                    rnd = r.get("current_round", "?")
-                    b = r.get("banker_wins", "0")
-                    p_w = r.get("player_wins", "0")
-                    t_w = r.get("tie_count", "0")
-                    # 房間顯示名稱
-                    if tid.startswith("BAG"):
-                        display = f"百家樂{tname}"
-                    elif tid.startswith("DTG"):
-                        display = f"龍虎{tname}"
-                    else:
-                        display = f"{tname}"
-                    info_line = f"👩{dealer} 👥{players} | 莊{b} 閒{p_w} 和{t_w}"
-                    room_items.append({
-                        "type": "box", "layout": "vertical", "spacing": "xs",
-                        "paddingAll": "sm", "backgroundColor": "#f0f0f0", "cornerRadius": "md",
-                        "action": {"type": "message", "label": display, "text": display},
-                        "contents": [
-                            {"type": "text", "text": f"{emoji} {display}", "weight": "bold", "size": "sm", "color": "#333333"},
-                            {"type": "text", "text": info_line, "size": "xxs", "color": "#666666", "wrap": True}
-                        ]
-                    })
-                room_items.append({"type": "button", "action": {"type": "message", "label": "↩ 返回主選單", "text": "返回主選單"}, "style": "secondary", "height": "sm"})
-                room_flex = {
-                    "type": "flex", "altText": f"MT{category} - 選擇房間",
-                    "contents": {
-                        "type": "bubble", "size": "mega",
-                        "header": {"type": "box", "layout": "vertical", "backgroundColor": header_color, "paddingAll": "sm", "contents": [
-                            {"type": "text", "text": f"{emoji} MT真人 - {category}", "color": "#ffffff", "weight": "bold", "size": "md", "align": "center"},
-                            {"type": "text", "text": "🔴 即時數據", "color": "#FFD700", "size": "xxs", "align": "center"}
-                        ]},
-                        "body": {"type": "box", "layout": "vertical", "spacing": "sm", "paddingAll": "md", "contents": room_items}
-                    }
-                }
-                line_reply(tk, room_flex)
+            # ── 靜態房間列表 ──
+            if category == "亞洲廳":
+                row1 = [{"type": "button", "action": {"type": "message", "label": f"百家樂{i}", "text": f"百家樂{i}"}, "style": "primary", "color": "#2E86C1", "height": "sm"} for i in range(1, 6)]
+                row2 = [{"type": "button", "action": {"type": "message", "label": f"百家樂{i}", "text": f"百家樂{i}"}, "style": "primary", "color": "#2E86C1", "height": "sm"} for i in range(6, 14)]
+                body_items = row1 + row2 + [
+                    {"type": "button", "action": {"type": "message", "label": "百家樂3A", "text": "百家樂3A"}, "style": "secondary", "height": "sm"},
+                    {"type": "button", "action": {"type": "message", "label": "↩ 返回主選單", "text": "返回主選單"}, "style": "secondary", "height": "sm"}
+                ]
+            elif category == "國際廳":
+                body_items = [
+                    {"type": "text", "text": "🚧 國際廳即將開放，敬請期待！", "size": "sm", "color": "#888888", "align": "center", "wrap": True},
+                    {"type": "button", "action": {"type": "message", "label": "↩ 返回主選單", "text": "返回主選單"}, "style": "secondary", "height": "sm"}
+                ]
             else:
-                # ── 無即時數據：fallback 靜態列表 ──
-                if category == "中文廳":
-                    row1 = [{"type": "button", "action": {"type": "message", "label": f"百家樂{i}", "text": f"百家樂{i}"}, "style": "primary", "color": "#2E86C1", "height": "sm"} for i in range(1, 6)]
-                    row2 = [{"type": "button", "action": {"type": "message", "label": f"百家樂{i}", "text": f"百家樂{i}"}, "style": "primary", "color": "#2E86C1", "height": "sm"} for i in range(6, 14)]
-                    body_items = row1 + row2 + [
-                        {"type": "button", "action": {"type": "message", "label": "百家樂3A", "text": "百家樂3A"}, "style": "secondary", "height": "sm"},
-                        {"type": "button", "action": {"type": "message", "label": "↩ 返回主選單", "text": "返回主選單"}, "style": "secondary", "height": "sm"}
-                    ]
-                elif category == "亞洲廳":
-                    body_items = [
-                        {"type": "button", "action": {"type": "message", "label": "百家樂3A", "text": "百家樂3A"}, "style": "primary", "color": "#1A5276", "height": "sm"},
-                        {"type": "button", "action": {"type": "message", "label": "↩ 返回主選單", "text": "返回主選單"}, "style": "secondary", "height": "sm"}
-                    ]
-                elif category == "龍虎":
-                    body_items = [{"type": "button", "action": {"type": "message", "label": f"龍虎{i}", "text": f"龍虎{i}"}, "style": "primary", "color": "#D4AC0D", "height": "sm"} for i in range(1, 4)]
-                    body_items.append({"type": "button", "action": {"type": "message", "label": "↩ 返回主選單", "text": "返回主選單"}, "style": "secondary", "height": "sm"})
-                else:
-                    body_items = [{"type": "button", "action": {"type": "message", "label": "↩ 返回主選單", "text": "返回主選單"}, "style": "secondary", "height": "sm"}]
-                room_flex = {
-                    "type": "flex", "altText": f"MT{category} - 選擇房間",
-                    "contents": {
-                        "type": "bubble", "size": "mega",
-                        "header": {"type": "box", "layout": "vertical", "backgroundColor": header_color, "paddingAll": "sm", "contents": [
-                            {"type": "text", "text": f"{emoji} MT真人 - {category}", "color": "#ffffff", "weight": "bold", "size": "md", "align": "center"}
-                        ]},
-                        "body": {"type": "box", "layout": "vertical", "spacing": "sm", "paddingAll": "md", "contents": body_items}
-                    }
+                body_items = [{"type": "button", "action": {"type": "message", "label": "↩ 返回主選單", "text": "返回主選單"}, "style": "secondary", "height": "sm"}]
+            room_flex = {
+                "type": "flex", "altText": f"MT{category} - 選擇房間",
+                "contents": {
+                    "type": "bubble", "size": "mega",
+                    "header": {"type": "box", "layout": "vertical", "backgroundColor": header_color, "paddingAll": "sm", "contents": [
+                        {"type": "text", "text": f"{emoji} MT真人 - {category}", "color": "#ffffff", "weight": "bold", "size": "md", "align": "center"}
+                    ]},
+                    "body": {"type": "box", "layout": "vertical", "spacing": "sm", "paddingAll": "md", "contents": body_items}
                 }
-                line_reply(tk, room_flex)
+            }
+            line_reply(tk, room_flex)
             continue
 
         elif isinstance(mode, dict) and mode.get("state") == "choose_room":
@@ -1331,12 +1280,10 @@ def webhook():
                 rn = room_name
                 if rn.startswith("百家樂") and len(rn) > 3 and rn[3] != " ":
                     rn = "百家樂 " + rn[3:]
-                if rn.startswith("龍虎") and len(rn) > 2 and rn[2] != " ":
-                    rn = "龍虎 " + rn[2:]
                 room_name = rn
-                mt_valid = [f"百家樂 {i}" for i in range(1, 14)] + ["百家樂 3A"] + [f"龍虎 {i}" for i in range(1, 4)]
+                mt_valid = [f"百家樂 {i}" for i in range(1, 14)] + ["百家樂 3A"]
                 if room_name not in mt_valid:
-                    line_reply(tk, text_with_back("⚠️ MT真人房號格式錯誤\n\n百家樂：百家樂1~百家樂13、百家樂3A\n龍虎：龍虎1~龍虎3"))
+                    line_reply(tk, text_with_back("⚠️ MT真人房號格式錯誤\n\n百家樂：百家樂1~百家樂13、百家樂3A"))
                     continue
 
                 # ── MT真人：手動輸入模式 ──
