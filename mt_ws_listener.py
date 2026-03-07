@@ -157,7 +157,7 @@ def _log(msg):
 
 
 async def _run_listener():
-    """主監聽迴圈：用 fetch_mt_token_with_session() 取得 token+browser → 直接在同一 browser 監聽 WS"""
+    """主監聽迴圈：HTTP 取 token → Playwright 開 MT 遊戲頁面 → 監聽 WS"""
     global _listener_running
     _log("_run_listener 開始執行")
 
@@ -165,7 +165,9 @@ async def _run_listener():
         import os as _os
         _os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", "/opt/render/.cache/pw-browsers")
         _log(f"PLAYWRIGHT_BROWSERS_PATH={_os.environ.get('PLAYWRIGHT_BROWSERS_PATH', 'NOT SET')}")
-        from mt_token import fetch_mt_token_with_session
+        from playwright.async_api import async_playwright
+        _log("playwright import OK")
+        from mt_token import get_mt_token
         _log("mt_token import OK")
     except Exception as e:
         _log(f"import 失敗: {e}\n{_tb.format_exc()}")
@@ -174,21 +176,38 @@ async def _run_listener():
     reconnect_delay = 10
 
     while _listener_running:
-        pw_instance = None
         browser = None
         try:
-            # ---- Step1: 登入+取token（返回同一個 browser session）----
-            _log("Step1: 登入平台+取得 MT token...")
-            pw_instance, browser, context, token = await fetch_mt_token_with_session()
+            # ---- Step1: HTTP API 取 token（不需 Playwright）----
+            _log("Step1: 取得 MT token (HTTP)...")
+            token = await get_mt_token()
+            if not token:
+                _log("token 為空，重試")
+                await asyncio.sleep(reconnect_delay)
+                continue
             _log(f"Step1 OK: token={token[:16]}...")
 
-            # ---- Step2: 在現有 context 中找到 MT 遊戲頁面 ----
-            _log(f"Step2: 尋找 MT 遊戲頁面（共 {len(context.pages)} 個分頁）...")
+            # ---- Step2: Playwright 開 MT 遊戲頁面 ----
+            mt_url = f"https://gs1.ofalive99.net/?token={token}&lang=zhtw"
+            _log("Step2: 啟動 Playwright 開 MT 遊戲頁面...")
 
-            ws_connected = asyncio.Event()
-            ws_closed = asyncio.Event()
+            async with async_playwright() as pw:
+                browser = await pw.chromium.launch(
+                    headless=True,
+                    args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"]
+                )
+                _log("Step2a: browser launched")
+                page = await browser.new_page(
+                    viewport={"width": 1280, "height": 800},
+                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                               "AppleWebKit/537.36 (KHTML, like Gecko) "
+                               "Chrome/125.0.0.0 Safari/537.36"
+                )
 
-            def _bind_ws(target_page):
+                # 先綁定 WS 監聽，再 goto
+                ws_connected = asyncio.Event()
+                ws_closed = asyncio.Event()
+
                 def on_ws(ws):
                     _log(f"WS 偵測到: {ws.url[:80]}")
                     if "/ws" not in ws.url:
@@ -220,85 +239,44 @@ async def _run_listener():
 
                     ws.on("framereceived", on_frame)
                     ws.on("close", on_close)
-                target_page.on("websocket", on_ws)
 
-            # 綁定 WS 監聽到所有現有頁面
-            mt_page = None
-            for pg in context.pages:
-                _log(f"  分頁: {pg.url[:60]}")
-                _bind_ws(pg)
-                if "ofalive" in pg.url or "token=" in pg.url:
-                    mt_page = pg
+                page.on("websocket", on_ws)
 
-            # 監聽未來新分頁
-            def on_new_page(new_page):
-                _log(f"  新分頁: {new_page.url[:60]}")
-                _bind_ws(new_page)
-            context.on("page", on_new_page)
+                # goto MT 遊戲頁面
+                _log(f"Step3: goto {mt_url[:60]}...")
+                await page.goto(mt_url, wait_until="domcontentloaded", timeout=60000)
+                _log(f"Step3 OK: URL={page.url[:80]}")
 
-            # ---- Step3: 等待 WS ----
-            _log("Step3: 等待 WS 連線...")
-            try:
-                await asyncio.wait_for(ws_connected.wait(), timeout=30)
-            except asyncio.TimeoutError:
-                if mt_page:
-                    _log(f"Step3a: MT頁面存在({mt_page.url[:60]})但WS未建立，再等30s...")
-                else:
-                    # 手動 goto MT
-                    _log("Step3a: 沒找到MT頁面，手動開啟...")
-                    mt_url = f"https://gsa.ofalive99.net/?token={token}&lang=zhtw"
-                    mt_page = await context.new_page()
-                    _bind_ws(mt_page)
-                    await mt_page.goto(mt_url, wait_until="domcontentloaded", timeout=60000)
-                    _log(f"Step3a: goto 完成, URL={mt_page.url[:60]}")
-                await asyncio.sleep(15)
-                if not ws_connected.is_set():
-                    try:
-                        await asyncio.wait_for(ws_connected.wait(), timeout=15)
-                    except asyncio.TimeoutError:
-                        pages_info = [pg.url[:50] for pg in context.pages]
-                        _log(f"WS 超時，所有頁面: {pages_info}")
-                        await browser.close()
-                        await pw_instance.stop()
-                        continue
-
-            _log("✅ WS 已連線，開始監聽即時開牌")
-            reconnect_delay = 10
-
-            # 找到 MT 頁面用於 keep-alive
-            if not mt_page:
-                for pg in context.pages:
-                    if "ofalive" in pg.url or "token=" in pg.url:
-                        mt_page = pg
-                        break
-            if not mt_page:
-                mt_page = context.pages[-1] if context.pages else None
-
-            # ---- 保持運行直到 WS 斷開 ----
-            while _listener_running and not ws_closed.is_set():
+                # ---- Step4: 等待 WS 連線 ----
+                _log("Step4: 等待 WS 連線...")
                 try:
-                    await asyncio.wait_for(ws_closed.wait(), timeout=300)
+                    await asyncio.wait_for(ws_connected.wait(), timeout=45)
                 except asyncio.TimeoutError:
-                    if mt_page:
+                    _log(f"WS 45s 超時，頁面 URL={page.url[:80]}")
+                    await browser.close()
+                    continue
+
+                _log("✅ WS 已連線，開始監聽即時開牌")
+                reconnect_delay = 10
+
+                # ---- 保持運行直到 WS 斷開 ----
+                while _listener_running and not ws_closed.is_set():
+                    try:
+                        await asyncio.wait_for(ws_closed.wait(), timeout=300)
+                    except asyncio.TimeoutError:
                         try:
-                            await mt_page.evaluate("1+1")
+                            await page.evaluate("1+1")
                         except Exception:
                             _log("頁面已失效，重新連線")
                             break
 
-            await browser.close()
-            await pw_instance.stop()
+                await browser.close()
 
         except Exception as e:
             _log(f"錯誤: {e}\n{_tb.format_exc()}")
             if browser:
                 try:
                     await browser.close()
-                except Exception:
-                    pass
-            if pw_instance:
-                try:
-                    await pw_instance.stop()
                 except Exception:
                     pass
 
