@@ -158,23 +158,28 @@ def _log(msg):
 
 
 async def _run_listener():
-    """主監聽迴圈：HTTP 取 token → curl_cffi 純 WS 連接 MT 伺服器"""
+    """主監聽迴圈：curl_cffi 下載頁面資源 → Playwright 渲染 → JS 自動建立 WS → 監聽事件"""
     global _listener_running
     _log("_run_listener 開始執行")
 
     try:
-        from curl_cffi.requests import AsyncSession
+        import os as _os
+        _os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", "/opt/render/.cache/pw-browsers")
+        from curl_cffi import requests as curl_requests
         _log("curl_cffi import OK")
+        from playwright.async_api import async_playwright
+        _log("playwright import OK")
         from mt_token import get_mt_token
         _log("mt_token import OK")
     except Exception as e:
         _log(f"import 失敗: {e}\n{_tb.format_exc()}")
         return
 
-    WS_URL = "wss://a1.ofalive99.net/game/ws"
     reconnect_delay = 10
 
     while _listener_running:
+        browser = None
+        pw_instance = None
         try:
             # ---- Step1: HTTP API 取 token ----
             _log("Step1: 取得 MT token (HTTP)...")
@@ -183,205 +188,220 @@ async def _run_listener():
                 _log("token 為空，重試")
                 await asyncio.sleep(reconnect_delay)
                 continue
+            lobby_url = f"https://gs1.ofalive99.net/?token={token}&lang=zhtw"
             _log(f"Step1 OK: token={token[:16]}...")
 
-            # ---- Step2: curl_cffi WS 連線（模擬 Chrome TLS）----
-            _log(f"Step2: WS 連線 {WS_URL}...")
+            # ---- Step2: curl_cffi 預下載頁面資源 ----
+            _log("Step2: curl_cffi 下載遊戲頁面資源...")
+            cf_session = curl_requests.Session(impersonate="chrome")
+            resource_cache = {}  # {url_path: (content_type, body_bytes)}
 
-            async with AsyncSession(impersonate="chrome") as session:
-                ws = await session.ws_connect(
-                    WS_URL,
-                    headers={
-                        "Origin": "https://gs1.ofalive99.net",
-                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                                      "AppleWebKit/537.36 (KHTML, like Gecko) "
-                                      "Chrome/125.0.0.0 Safari/537.36",
-                    }
-                )
-                _log("Step2 OK: WS 已連線")
+            # 下載主頁面 HTML
+            r = cf_session.get(lobby_url, timeout=20)
+            if r.status_code != 200:
+                _log(f"Step2 頁面下載失敗: {r.status_code}")
+                await asyncio.sleep(reconnect_delay)
+                continue
+            page_html = r.text
+            resource_cache["__main__"] = ("text/html", r.content)
+            _log(f"Step2: HTML 下載成功 ({len(page_html)} chars)")
 
-                # ---- Step3: 認證 ----
-                auth_msg = {
-                    "method": "POST",
-                    "action": {"name": "/api/v1/authenticate"},
-                    "body": {"type": 3, "token": token}
-                }
-                await ws.send(json.dumps(auth_msg))
-                _log("Step3: 已發送 authenticate")
+            # 從 HTML 提取 JS/CSS 資源 URL 並下載
+            import re as _re
+            asset_urls = _re.findall(r'(?:src|href)="(/assets/[^"]+)"', page_html)
+            _log(f"Step2: 找到 {len(asset_urls)} 個資源")
+            for asset_path in asset_urls:
+                full_url = f"https://gs1.ofalive99.net{asset_path}"
+                try:
+                    ar = cf_session.get(full_url, timeout=20)
+                    if ar.status_code == 200:
+                        ct = ar.headers.get("content-type", "application/octet-stream")
+                        resource_cache[asset_path] = (ct, ar.content)
+                        _log(f"  ✅ {asset_path} ({len(ar.content)} bytes)")
+                    else:
+                        _log(f"  ❌ {asset_path} → {ar.status_code}")
+                except Exception as ex:
+                    _log(f"  ❌ {asset_path} → {ex}")
 
-                # 等待認證回應（最多讀 10 條訊息）
-                # 伺服器可能不回 authenticate action，而是直接推送 member/statistics
-                auth_ok = False
-                for _i in range(10):
+            # 也下載 NodePlayer-simd.min.js（頁面中引用的）
+            for extra_js in ["/NodePlayer-simd.min.js"]:
+                try:
+                    ar = cf_session.get(f"https://gs1.ofalive99.net{extra_js}", timeout=10)
+                    if ar.status_code == 200:
+                        ct = ar.headers.get("content-type", "application/javascript")
+                        resource_cache[extra_js] = (ct, ar.content)
+                        _log(f"  ✅ {extra_js} ({len(ar.content)} bytes)")
+                except Exception:
+                    pass
+
+            cf_session.close()
+            _log(f"Step2 完成: 快取 {len(resource_cache)} 個資源")
+
+            # ---- Step3: Playwright 渲染頁面（用 route 攔截返回快取資源）----
+            _log("Step3: Playwright 啟動...")
+            pw_instance = await async_playwright().start()
+            browser = await pw_instance.chromium.launch(
+                headless=True,
+                args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"]
+            )
+            context = await browser.new_context(
+                viewport={"width": 1280, "height": 800},
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                           "AppleWebKit/537.36 (KHTML, like Gecko) "
+                           "Chrome/125.0.0.0 Safari/537.36",
+            )
+            page = await context.new_page()
+
+            # 設置路由攔截：ofalive99.net 的請求用快取回應
+            async def route_handler(route):
+                url = route.request.url
+                # 取得路徑部分
+                from urllib.parse import urlparse
+                parsed = urlparse(url)
+                path = parsed.path
+                query = parsed.query
+
+                # 主頁面請求
+                if path == "/" and "token=" in query:
+                    if "__main__" in resource_cache:
+                        ct, body = resource_cache["__main__"]
+                        await route.fulfill(status=200, content_type="text/html", body=body)
+                        return
+
+                # 資源請求
+                if path in resource_cache:
+                    ct, body = resource_cache[path]
+                    await route.fulfill(status=200, content_type=ct, body=body)
+                    return
+
+                # 其他 ofalive99 請求：嘗試用 curl_cffi 代理
+                if "ofalive99.net" in url and not url.startswith("wss://"):
                     try:
-                        raw = await asyncio.wait_for(ws.recv(), timeout=10)
-                        if isinstance(raw, tuple): raw = raw[0]
-                        if isinstance(raw, bytes): raw = raw.decode("utf-8", errors="replace")
-                        data = json.loads(raw)
-                        action = data.get("action", "")
-                        aname = action.get("name", "") if isinstance(action, dict) else str(action)
-                        err = data.get("err", "")
-                        _log(f"AUTH_WAIT#{_i}: action={aname[:80]} err={err} msg_preview={str(data.get('msg',''))[:200]}")
-                        if "authenticate" in aname:
-                            if err:
-                                _log(f"認證失敗: {err}，重新取 token...")
-                                from mt_token import get_mt_token as _refresh_token
-                                token = await _refresh_token(force_refresh=True)
-                                break
-                            auth_ok = True
-                            _log("✅ 認證成功 (explicit)")
-                            break
-                        elif "member" in aname:
-                            # member/statistics = 伺服器認證後推送的用戶資料
-                            auth_ok = True
-                            _log("✅ 認證成功 (implicit: member/statistics received)")
-                            break
-                    except asyncio.TimeoutError:
-                        _log("等待認證回應超時")
-                        break
-                    except Exception as ex:
-                        _log(f"AUTH_WAIT#{_i} 異常: {ex}")
-                        continue
-
-                if not auth_ok:
-                    _log("認證未確認，仍嘗試發送 tables 請求...")
-
-                # 消化所有待處理的 member/statistics 訊息
-                drained = 0
-                while True:
-                    try:
-                        raw = await asyncio.wait_for(ws.recv(), timeout=2)
-                        if isinstance(raw, tuple): raw = raw[0]
-                        if isinstance(raw, bytes): raw = raw.decode("utf-8", errors="replace")
-                        drained += 1
-                    except asyncio.TimeoutError:
-                        break
-                if drained:
-                    _log(f"已消化 {drained} 條待處理訊息")
-
-                await asyncio.sleep(2)
-
-                # ---- Step4: 嘗試多種訂閱/請求格式 ----
-                subscribe_requests = [
-                    ("lobby_join", {"method": "POST", "action": {"name": "/api/v1/lobby/join"}, "body": {}}),
-                    ("room_enter", {"method": "POST", "action": {"name": "/api/v1/room/enter"}, "body": {"room_id": 1, "gametype_id": 3, "game_id": 1}}),
-                    ("subscribe", {"method": "POST", "action": {"name": "/api/v1/subscribe"}, "body": {"type": "all"}}),
-                    ("tables_v1", {"method": "GET", "action": {"name": "/api/v1/gametype/*/game/*/room/*/tables", "data": {"gametype_id": 3, "game_id": 1, "room_id": 1}}}),
-                    ("tables_v2", {"action": "/api/v1/gametype/3/game/1/room/1/tables"}),
-                    ("tables_v3", {"method": "GET", "action": "/api/v1/tables"}),
-                    ("room_sub", {"method": "POST", "action": {"name": "/api/v1/gametype/3/game/1/room/1/subscribe"}}),
-                    ("tables_v4", {"method": "GET", "action": {"name": "/api/v1/gametype/3/game/1/room/1/tables"}}),
-                ]
-                for label, req in subscribe_requests:
-                    await ws.send(json.dumps(req))
-                    _log(f"Step4 sent: {label}")
-                    await asyncio.sleep(0.3)
-
-                # 讀取所有回應（10 秒內），看哪個格式有效
-                _log("Step4: 等待 tables 回應 (10s)...")
-                resp_count = 0
-                found_tables = False
-                t0 = time.time()
-                while time.time() - t0 < 10:
-                    try:
-                        raw = await asyncio.wait_for(ws.recv(), timeout=3)
-                        if isinstance(raw, tuple): raw = raw[0]
-                        if isinstance(raw, bytes): raw = raw.decode("utf-8", errors="replace")
-                        data = json.loads(raw)
-                        action = data.get("action", "")
-                        aname = action.get("name", "") if isinstance(action, dict) else str(action)
-                        resp_count += 1
-                        if "member/statistics" not in aname:
-                            _log(f"Step4 RESP: action={aname} keys={list(data.keys())} msg={str(data.get('msg',''))[:300]}")
-                            # 嘗試解析 tables
-                            msg = data.get("msg", {})
-                            if isinstance(msg, dict):
-                                for key in ["tables", "data", "rooms", "list"]:
-                                    if key in msg:
-                                        _log(f"  Found '{key}' in msg: {str(msg[key])[:300]}")
-                                        found_tables = True
-                    except asyncio.TimeoutError:
-                        continue
+                        proxy_session = curl_requests.Session(impersonate="chrome")
+                        pr = proxy_session.get(url, timeout=15)
+                        proxy_session.close()
+                        await route.fulfill(
+                            status=pr.status_code,
+                            content_type=pr.headers.get("content-type", "text/plain"),
+                            body=pr.content
+                        )
+                        return
                     except Exception:
-                        continue
-                _log(f"Step4 完成: {resp_count} 條回應, tables_found={found_tables}")
+                        pass
 
-                _log("✅ WS 已連線，開始監聽即時開牌")
-                reconnect_delay = 10
-                last_ping = time.time()
-                msg_count = 0
-                seen_actions = set()
+                # 放行其他請求（如 CDN、Google Analytics 等）
+                try:
+                    await route.continue_()
+                except Exception:
+                    await route.abort()
 
-                # ---- Step5: 持續監聽 ----
-                while _listener_running:
+            await page.route("**/*ofalive99.net/**", route_handler)
+            await page.route("**/gs1.ofalive99.net/**", route_handler)
+
+            # ---- Step4: 綁定 WS 監聽 → 開頁面 ----
+            ws_connected = asyncio.Event()
+            ws_closed = asyncio.Event()
+
+            def on_ws(ws):
+                _log(f"WS 偵測到: {ws.url[:80]}")
+                if "/ws" not in ws.url:
+                    return
+                _log(f"✅ 目標 WS 已連線: {ws.url[:80]}")
+                ws_connected.set()
+
+                def on_frame(payload):
                     try:
-                        raw = await asyncio.wait_for(ws.recv(), timeout=60)
-                    except asyncio.TimeoutError:
-                        # 60 秒沒訊息，發 ping 保活
-                        if time.time() - last_ping > 55:
-                            try:
-                                await ws.send(json.dumps({"action": "/ping"}))
-                                last_ping = time.time()
-                                _log(f"sent ping (total msgs={msg_count}, actions={seen_actions})")
-                            except Exception:
-                                _log("ping 失敗，重新連線")
-                                break
-                        continue
-
-                    # curl_cffi 可能返回 tuple (msg, type)
-                    if isinstance(raw, tuple):
-                        msg_text = raw[0]
-                    else:
-                        msg_text = raw
-                    if isinstance(msg_text, bytes):
-                        msg_text = msg_text.decode("utf-8", errors="replace")
-
-                    msg_count += 1
-
-                    try:
-                        data = json.loads(msg_text)
-                    except (json.JSONDecodeError, TypeError):
-                        if msg_count <= 5:
-                            _log(f"MSG#{msg_count} JSON解析失敗: {str(msg_text)[:200]}")
-                        continue
-
-                    action = data.get("action", "")
-                    if isinstance(action, dict):
-                        aname = action.get("name", "")
-                    else:
-                        aname = str(action)
-
-                    # 記錄新出現的 action 類型
-                    if aname not in seen_actions:
-                        seen_actions.add(aname)
-                        _log(f"NEW_ACTION: {aname} keys={list(data.keys())} msg_preview={str(data.get('msg',''))[:300]}")
-
-                    if isinstance(action, dict):
-                        name = action.get("name", "")
-                        # show_win 事件
-                        if "show_win" in name:
-                            _on_show_win(data.get("body", {}))
-                        # tables 回應
-                        elif "tables" in name:
-                            msg_data = data.get("msg", {})
-                            tables = msg_data.get("tables", [])
+                        data = json.loads(payload)
+                        action = data.get("action", "")
+                        if isinstance(action, dict):
+                            name = action.get("name", "")
+                            if "show_win" in name:
+                                _on_show_win(data.get("body", {}))
+                            elif "tables" in name:
+                                msg = data.get("msg", {})
+                                tables = msg.get("tables", [])
+                                if isinstance(tables, dict):
+                                    tables = tables.get("tables", [])
+                                if tables:
+                                    _on_tables_response(tables)
+                        elif isinstance(action, str) and "tables" in action:
+                            msg = data.get("msg", {})
+                            tables = msg.get("tables", [])
                             if isinstance(tables, dict):
                                 tables = tables.get("tables", [])
                             if tables:
                                 _on_tables_response(tables)
-                            else:
-                                _log(f"tables 回應但無桌台: keys={list(msg_data.keys())}")
-                    elif isinstance(action, str):
-                        if "tables" in action:
-                            msg_data = data.get("msg", {})
-                            tables = msg_data.get("tables", [])
-                            if isinstance(tables, dict):
-                                tables = tables.get("tables", [])
-                            if tables:
-                                _on_tables_response(tables)
+                    except Exception:
+                        pass
+
+                def on_close():
+                    _log("WS 已斷開")
+                    ws_closed.set()
+
+                ws.on("framereceived", on_frame)
+                ws.on("close", on_close)
+
+            page.on("websocket", on_ws)
+
+            # 捕獲 JS 錯誤
+            def on_console(msg):
+                if msg.type in ("error", "warning"):
+                    _log(f"[JS {msg.type}] {msg.text[:150]}")
+            page.on("console", on_console)
+
+            _log(f"Step4: goto {lobby_url[:60]}...")
+            await page.goto(lobby_url, wait_until="domcontentloaded", timeout=60000)
+            title = await page.title()
+            _log(f"Step4: title={title}, URL={page.url[:80]}")
+
+            if "受限" in title or "403" in title or "RESTRICTED" in title:
+                _log("⚠️ 頁面被封鎖，刷新 token 重試...")
+                await browser.close()
+                await pw_instance.stop()
+                from mt_token import get_mt_token as _refresh
+                await _refresh(force_refresh=True)
+                await asyncio.sleep(reconnect_delay)
+                continue
+
+            # ---- Step5: 等待 WS 連線 ----
+            _log("Step5: 等待 WS 連線...")
+            try:
+                await asyncio.wait_for(ws_connected.wait(), timeout=45)
+            except asyncio.TimeoutError:
+                _log("WS 45s 超時")
+                await browser.close()
+                await pw_instance.stop()
+                continue
+
+            _log("✅ WS 已連線，開始監聽即時開牌")
+            reconnect_delay = 10
+
+            # ---- 保持運行直到 WS 斷開 ----
+            while _listener_running and not ws_closed.is_set():
+                try:
+                    await asyncio.wait_for(ws_closed.wait(), timeout=300)
+                except asyncio.TimeoutError:
+                    try:
+                        await page.evaluate("1+1")
+                    except Exception:
+                        _log("頁面已失效，重新連線")
+                        break
+
+            await browser.close()
+            await pw_instance.stop()
 
         except Exception as e:
             _log(f"錯誤: {e}\n{_tb.format_exc()}")
+            if browser:
+                try:
+                    await browser.close()
+                except Exception:
+                    pass
+            if pw_instance:
+                try:
+                    await pw_instance.stop()
+                except Exception:
+                    pass
 
         if _listener_running:
             _log(f"{int(reconnect_delay)} 秒後重新連線...")
