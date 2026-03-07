@@ -248,17 +248,39 @@ async def _run_listener():
 
                 page.on("websocket", on_ws)
 
+                # 捕獲 JS console 錯誤
+                def on_console(msg):
+                    if msg.type in ("error", "warning"):
+                        _log(f"[JS {msg.type}] {msg.text[:150]}")
+                page.on("console", on_console)
+
+                def on_page_error(err):
+                    _log(f"[PAGE ERROR] {str(err)[:150]}")
+                page.on("pageerror", on_page_error)
+
                 # goto MT 遊戲頁面（用完整 lobbyURL）
                 _log(f"Step3: goto {lobby_url[:60]}...")
                 await page.goto(lobby_url, wait_until="domcontentloaded", timeout=60000)
-                _log(f"Step3 OK: URL={page.url[:80]}")
+                title = await page.title()
+                _log(f"Step3 OK: URL={page.url[:80]}, title={title}")
+
+                # 檢查是否被封鎖
+                if "受限" in title or "403" in title or "限制" in title:
+                    _log("⚠️ 頁面被封鎖（403），token 可能過期，強制刷新...")
+                    from mt_token import get_mt_token_and_lobby as _refresh
+                    token, lobby_url = await _refresh(force_refresh=True)
+                    _log(f"新 token={token[:16]}..., 重新 goto...")
+                    await page.goto(lobby_url, wait_until="domcontentloaded", timeout=60000)
+                    title = await page.title()
+                    _log(f"重新 goto: title={title}")
 
                 # ---- Step4: 等待 WS 連線 ----
                 _log("Step4: 等待 WS 連線...")
                 try:
                     await asyncio.wait_for(ws_connected.wait(), timeout=45)
                 except asyncio.TimeoutError:
-                    _log(f"WS 45s 超時，頁面 URL={page.url[:80]}")
+                    title2 = await page.title()
+                    _log(f"WS 45s 超時，title={title2}, URL={page.url[:80]}")
                     await browser.close()
                     continue
 
