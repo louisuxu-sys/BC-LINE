@@ -1583,12 +1583,17 @@ def health():
 user_access_data = load_data(USER_DATA_FILE)
 time_cards_data = load_data(TIME_CARDS_FILE, {"active_cards": {}, "used_cards": {}})
 
-# 啟動 MT 即時牌路監聽器（背景執行緒）
-try:
-    _ensure_mt_listener()
-    print("[MT] 即時牌路監聽器已隨 app 啟動")
-except Exception as e:
-    print(f"[MT] 監聽器啟動失敗（將在用戶觸發時重試）: {e}")
+# 延遲啟動 MT 監聽器（讓 gunicorn worker 先完成啟動，避免被 SIGTERM）
+def _delayed_listener_start():
+    import time as _t
+    _t.sleep(10)  # 等 10 秒讓 worker 就緒
+    try:
+        _ensure_mt_listener()
+        print("[MT] 即時牌路監聽器已延遲啟動", flush=True)
+    except Exception as e:
+        print(f"[MT] 監聽器啟動失敗（將在用戶觸發時重試）: {e}", flush=True)
+
+threading.Thread(target=_delayed_listener_start, daemon=True).start()
 
 if __name__ == "__main__":
     print("=== SV94 Bot 啟動成功 (port 5001) ===")

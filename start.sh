@@ -15,4 +15,4 @@ print('OK: Playwright chromium works')
 " 2>&1 || echo "WARNING: browser test failed (will retry at runtime)"
 
 echo "=== Starting gunicorn ==="
-exec gunicorn sv94:app --bind 0.0.0.0:${PORT:-10000} --timeout 120 --workers 1
+exec gunicorn sv94:app --bind 0.0.0.0:${PORT:-10000} --timeout 300 --workers 1
