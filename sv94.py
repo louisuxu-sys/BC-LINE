@@ -63,7 +63,7 @@ time_cards_data = load_data(TIME_CARDS_FILE, {"active_cards": {}, "used_cards": 
 
 # --- 房間清單 ---
 MT_ROOMS = [f"百家樂 {i}" if i != 4 else "百家樂 3A" for i in range(1, 14)]
-DG_ROOMS = ([f"A0{i}" for i in range(1, 6) if i != 4] + [f"C0{i}" for i in range(1, 7) if i != 4] + [f"D0{i}" for i in range(1, 9) if i != 4])
+DG_ROOMS = [f"RB0{i}" for i in range(1, 8)] + [f"S0{i}" for i in range(1, 8)]
 
 # --- 安全驗證 ---
 def verify_signature(body, signature):
@@ -1233,7 +1233,7 @@ def webhook():
                 line_reply(tk, cat_flex)
             else:
                 chat_modes[uid] = {"state": "choose_room", "p": p_name}
-                line_reply(tk, text_with_back(f"✅ 已選擇 {p_name}\n\n請直接輸入房號：\n(例如：A01、C03、D05、RB01、S06)"))
+                line_reply(tk, text_with_back(f"✅ 已選擇 {p_name}\n\n請輸入房號：\n百家樂：RB01~RB07\n性感百家樂：S01~S07"))
             continue
 
         elif isinstance(mode, dict) and mode.get("state") == "mt_choose_category" and msg.startswith("MT廳:"):
@@ -1291,12 +1291,14 @@ def webhook():
                 chat_modes[uid] = {"state": "predicting", "room": room_name}
                 line_reply(tk, text_with_back(f"✅ 已選擇 {room_name}\n\n請輸入開牌結果：\n1(閒) 2(莊) 3(和)"))
                 continue
-            # DG 或其他平台 → 手動模式
+            # DG 或其他平台 → 驗證房號
+            rn = room_name.upper()
+            if rn not in DG_ROOMS:
+                line_reply(tk, text_with_back("⚠️ DG真人房號格式錯誤\n\n百家樂：RB01~RB07\n性感百家樂：S01~S07"))
+                continue
+            room_name = rn
             chat_modes[uid] = {"state": "predicting", "room": room_name}
-            line_reply(tk, [
-                sys_bubble(f"🔗 連線中... {room_name}"),
-                text_with_back(f"✅ 已成功連線 {room_name}\n\n請輸入開牌結果：\n1(閒) 2(莊) 3(和)")
-            ])
+            line_reply(tk, text_with_back(f"✅ 已選擇 {room_name}\n\n請輸入開牌結果：\n1(閒) 2(莊) 3(和)"))
             continue
 
         elif isinstance(mode, dict) and mode.get("state") == "predicting":
