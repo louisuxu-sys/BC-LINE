@@ -99,7 +99,7 @@ async def _fetch_mt_token_playwright():
 
         # ── 1. 前往平台首頁 ──
         logger.info("前往平台首頁: %s", platform_url)
-        await page.goto(platform_url, wait_until="networkidle", timeout=30000)
+        await page.goto(platform_url, wait_until="domcontentloaded", timeout=60000)
         await page.wait_for_timeout(2000)
 
         # ── 2. 關閉可能的公告彈窗（登入前） ──
@@ -370,7 +370,7 @@ async def fetch_mt_token_with_session():
     page = await context.new_page()
 
     # 登入
-    await page.goto(platform_url, wait_until="networkidle", timeout=30000)
+    await page.goto(platform_url, wait_until="domcontentloaded", timeout=60000)
     await page.wait_for_timeout(2000)
     await _dismiss_popups(page, "登入前")
 
