@@ -223,6 +223,7 @@ async def _run_listener():
                 _log("✅ WS 已連線，開始監聽即時開牌")
                 reconnect_delay = 10
                 last_ping = time.time()
+                msg_count = 0
 
                 # ---- Step4: 持續監聽 ----
                 while _listener_running:
@@ -234,6 +235,7 @@ async def _run_listener():
                             try:
                                 await ws.send(json.dumps({"action": "/ping"}))
                                 last_ping = time.time()
+                                _log("sent ping")
                             except Exception:
                                 _log("ping 失敗，重新連線")
                                 break
@@ -247,12 +249,20 @@ async def _run_listener():
                     if isinstance(msg_text, bytes):
                         msg_text = msg_text.decode("utf-8", errors="replace")
 
+                    msg_count += 1
+
                     try:
                         data = json.loads(msg_text)
                     except (json.JSONDecodeError, TypeError):
+                        if msg_count <= 20:
+                            _log(f"MSG#{msg_count} JSON解析失敗: {str(msg_text)[:200]}")
                         continue
 
+                    # 前 20 條訊息記錄 action 結構（診斷用）
                     action = data.get("action", "")
+                    if msg_count <= 20:
+                        _log(f"MSG#{msg_count} action={json.dumps(action, ensure_ascii=False)[:120]} keys={list(data.keys())}")
+
                     if isinstance(action, dict):
                         name = action.get("name", "")
                         # show_win 事件
@@ -266,6 +276,8 @@ async def _run_listener():
                                 tables = tables.get("tables", [])
                             if tables:
                                 _on_tables_response(tables)
+                            else:
+                                _log(f"tables 回應但無桌台: keys={list(msg_data.keys())}")
                     elif isinstance(action, str):
                         if "tables" in action:
                             msg_data = data.get("msg", {})
