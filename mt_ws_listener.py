@@ -157,7 +157,7 @@ def _log(msg):
 
 
 async def _run_listener():
-    """主監聽迴圈：開啟 MT 頁面，長駐監聽 WS 事件"""
+    """主監聽迴圈：登入平台 → 取 token → 開 MT 頁面 → 監聽 WS（全部在同一個 browser session）"""
     global _listener_running
     _log("_run_listener 開始執行")
 
@@ -167,29 +167,30 @@ async def _run_listener():
         _log(f"PLAYWRIGHT_BROWSERS_PATH={_os.environ.get('PLAYWRIGHT_BROWSERS_PATH', 'NOT SET')}")
         from playwright.async_api import async_playwright
         _log("playwright import OK")
-        from mt_token import get_mt_token
-        _log("mt_token import OK")
+        import re as _re
     except Exception as e:
         _log(f"import 失敗: {e}\n{_tb.format_exc()}")
         return
 
-    reconnect_delay = 10  # 秒
+    platform_url = _os.getenv("GR_PLATFORM_URL", "https://seofufan.seogrwin1688.com/")
+    username = _os.getenv("GR_USERNAME", "")
+    password = _os.getenv("GR_PASSWORD", "")
+    if not username or not password:
+        _log("錯誤: GR_USERNAME / GR_PASSWORD 未設定")
+        return
+
+    reconnect_delay = 10
 
     while _listener_running:
+        browser = None
         try:
-            _log("Step1: 取得 MT token...")
-            token = await get_mt_token()
-            _log(f"Step1 OK: token={token[:20] if token else 'None'}...")
-            mt_url = f"https://gsa.ofalive99.net/?token={token}&lang=zhtw"
-            _log("Step2: 啟動 Playwright...")
-
+            _log("Step1: 啟動 Playwright + 登入平台...")
             async with async_playwright() as p:
-                _log("Step2a: launching chromium...")
                 browser = await p.chromium.launch(
                     headless=True,
                     args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"]
                 )
-                _log("Step2b: browser launched OK")
+                _log("Step1a: browser launched")
                 context = await browser.new_context(
                     viewport={"width": 1280, "height": 800},
                     user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -198,26 +199,203 @@ async def _run_listener():
                 )
                 page = await context.new_page()
 
+                # ---- 登入平台 ----
+                _log(f"Step2: 前往平台 {platform_url[:40]}")
+                await page.goto(platform_url, wait_until="networkidle", timeout=30000)
+                await page.wait_for_timeout(2000)
+
+                # 關閉彈窗
+                for _ in range(5):
+                    try:
+                        btn = await page.query_selector('button:has-text("我知道了"), button:has-text("關閉"), button:has-text("确定"), .close-btn, [class*="close"]')
+                        if btn:
+                            await btn.click()
+                            await page.wait_for_timeout(500)
+                        else:
+                            break
+                    except Exception:
+                        break
+
+                # 輸入帳密
+                _log("Step2a: 登入中...")
+                account_sel = None
+                for sel in ['input[placeholder*="帳號"]', 'input[placeholder*="账号"]',
+                            'input[placeholder*="account"]', 'input[name="account"]',
+                            'input[type="text"]:first-of-type']:
+                    if await page.query_selector(sel):
+                        account_sel = sel
+                        break
+                pwd_sel = None
+                for sel in ['input[placeholder*="密碼"]', 'input[placeholder*="密码"]',
+                            'input[placeholder*="password"]', 'input[name="password"]',
+                            'input[type="password"]']:
+                    if await page.query_selector(sel):
+                        pwd_sel = sel
+                        break
+
+                if not account_sel or not pwd_sel:
+                    _log("找不到帳號/密碼輸入框")
+                    await browser.close()
+                    continue
+
+                await page.fill(account_sel, username)
+                await page.fill(pwd_sel, password)
+                await page.wait_for_timeout(300)
+
+                login_btn = None
+                for sel in ['button:has-text("登入")', 'button:has-text("登录")',
+                            'button:has-text("Sign In")', 'button[type="submit"]']:
+                    if await page.query_selector(sel):
+                        login_btn = sel
+                        break
+                if login_btn:
+                    btn_el = await page.query_selector(login_btn)
+                    if btn_el:
+                        await btn_el.evaluate("el => el.click()")
+                else:
+                    _log("找不到登入按鈕")
+                    await browser.close()
+                    continue
+
+                _log("Step2b: 等待登入完成...")
+                await page.wait_for_timeout(5000)
+
+                # 關閉登入後彈窗
+                for _ in range(8):
+                    try:
+                        btn = await page.query_selector('button:has-text("我知道了"), button:has-text("關閉"), button:has-text("确定"), .close-btn, [class*="close"]')
+                        if btn:
+                            await btn.click()
+                            await page.wait_for_timeout(500)
+                        else:
+                            break
+                    except Exception:
+                        break
+
+                # ---- 取得 MT Token ----
+                _log("Step3: 點擊 MT真人...")
+                token_future = asyncio.get_event_loop().create_future()
+
+                async def on_response(response):
+                    try:
+                        url = response.url
+                        if any(k in url.lower() for k in ["game", "launch", "login"]):
+                            if response.status == 200:
+                                try:
+                                    body = await response.text()
+                                    m = _re.search(r'token=([a-fA-F0-9]{32})', body)
+                                    if m and not token_future.done():
+                                        token_future.set_result(m.group(1))
+                                except Exception:
+                                    pass
+                    except Exception:
+                        pass
+
+                page.on("response", on_response)
+
+                def on_new_page(new_page):
+                    async def _extract():
+                        try:
+                            await new_page.wait_for_load_state("domcontentloaded", timeout=15000)
+                            url = new_page.url
+                            m = _re.search(r'[?&]token=([a-fA-F0-9]{32})', url)
+                            if m and not token_future.done():
+                                token_future.set_result(m.group(1))
+                        except Exception:
+                            pass
+                    asyncio.ensure_future(_extract())
+
+                context.on("page", on_new_page)
+
+                # 點擊「真人視訊」導航
+                try:
+                    clicked = await page.evaluate('''() => {
+                        const els = document.querySelectorAll('a, div, span');
+                        for (const el of els) {
+                            if (el.textContent.trim() === '真人視訊' || el.textContent.trim() === '真人视讯') {
+                                el.click(); return true;
+                            }
+                        }
+                        return false;
+                    }''')
+                    if clicked:
+                        _log("Step3a: 已點擊「真人視訊」")
+                except Exception:
+                    pass
+                await page.wait_for_timeout(3000)
+
+                # 點擊 MT真人
+                mt_clicked = await page.evaluate('''() => {
+                    const els = document.querySelectorAll('div, span, a, button, img');
+                    let best = null;
+                    for (const el of els) {
+                        const text = (el.textContent || el.alt || '');
+                        if (text.includes('MT真人') || text.includes('MT 真人')) {
+                            if (!best || el.textContent.length < best.textContent.length) best = el;
+                        }
+                    }
+                    if (best) { best.click(); return true; }
+                    return false;
+                }''')
+                if mt_clicked:
+                    _log("Step3b: 已點擊「MT真人」")
+                else:
+                    _log("找不到 MT真人 按鈕")
+                    await browser.close()
+                    continue
+
+                await page.wait_for_timeout(3000)
+
+                # 等待 token
+                token = None
+                try:
+                    token = await asyncio.wait_for(token_future, timeout=25)
+                    _log(f"Step3c: token={token[:16]}...")
+                except (asyncio.TimeoutError, TimeoutError):
+                    for p2 in context.pages:
+                        m = _re.search(r'[?&]token=([a-fA-F0-9]{32})', p2.url)
+                        if m:
+                            token = m.group(1)
+                            break
+                if not token:
+                    _log("取得 token 失敗")
+                    await browser.close()
+                    continue
+
+                # ---- 在同一 context 開 MT 遊戲頁面並監聽 WS ----
+                mt_url = f"https://gsa.ofalive99.net/?token={token}&lang=zhtw"
+                _log(f"Step4: 開啟 MT 遊戲頁面...")
+
+                # 找到 MT 遊戲頁面（可能已在新分頁打開）
+                mt_page = None
+                for pg in context.pages:
+                    if "ofalive" in pg.url or "token=" in pg.url:
+                        mt_page = pg
+                        break
+
+                if not mt_page:
+                    mt_page = await context.new_page()
+                    await mt_page.goto(mt_url, wait_until="domcontentloaded", timeout=60000)
+
+                _log(f"Step4a: MT 頁面 URL={mt_page.url[:60]}")
+
                 ws_connected = asyncio.Event()
                 ws_closed = asyncio.Event()
 
                 def on_ws(ws):
                     if "game/ws" not in ws.url:
                         return
-                    logger.info("[Listener] WebSocket 已連線: %s", ws.url)
+                    _log(f"WS 已連線: {ws.url[:60]}")
                     ws_connected.set()
 
                     def on_frame(payload):
                         try:
                             data = json.loads(payload)
                             action = data.get("action", "")
-
-                            # show_win 事件 → 即時開牌結果
                             if isinstance(action, dict):
                                 name = action.get("name", "")
                                 if "show_win" in name:
                                     _on_show_win(data.get("body", {}))
-                            # tables 回應 → 初始化歷史
                             elif isinstance(action, str) and "tables" in action:
                                 msg = data.get("msg", {})
                                 tables = msg.get("tables", [])
@@ -226,55 +404,56 @@ async def _run_listener():
                                 if tables:
                                     _on_tables_response(tables)
                         except Exception as e:
-                            logger.debug("[Listener] 解析訊息失敗: %s", e)
+                            pass
 
                     def on_close():
-                        logger.warning("[Listener] WebSocket 已斷開")
+                        _log("WS 已斷開")
                         ws_closed.set()
 
                     ws.on("framereceived", on_frame)
                     ws.on("close", on_close)
 
-                page.on("websocket", on_ws)
+                mt_page.on("websocket", on_ws)
 
-                _log(f"Step3: goto {mt_url[:60]}...")
-                await page.goto(mt_url, wait_until="domcontentloaded", timeout=60000)
-                _log("Step3 OK: 頁面載入完成")
+                # 如果頁面已經有 WS，重新載入以觸發事件
+                await mt_page.reload(wait_until="domcontentloaded", timeout=60000)
+                _log("Step4b: 頁面已載入，等待 WS...")
                 await asyncio.sleep(5)
 
-                # 等待 WS 連線
                 try:
                     await asyncio.wait_for(ws_connected.wait(), timeout=30)
                 except asyncio.TimeoutError:
-                    _log("等待 WS 連線超時 30s，重試...")
+                    _log("等待 WS 連線超時 30s")
                     await browser.close()
                     continue
 
-                _log("✅ WS 已連線，開始監聽即時開牌事件")
+                _log("✅ WS 已連線，開始監聽即時開牌")
+                reconnect_delay = 10  # 成功連線後重置
 
-                # 持續運行直到 WS 斷開或停止信號
-                # 每 5 分鐘 ping 一下頁面防止休眠
                 while _listener_running and not ws_closed.is_set():
                     try:
                         await asyncio.wait_for(ws_closed.wait(), timeout=300)
                     except asyncio.TimeoutError:
-                        # 5 分鐘沒斷開，ping 頁面保持活躍
                         try:
-                            await page.evaluate("1+1")
-                            logger.debug("[Listener] 頁面保活 ping 成功")
+                            await mt_page.evaluate("1+1")
                         except Exception:
-                            logger.warning("[Listener] 頁面已失效，重新連線...")
+                            _log("頁面已失效，重新連線")
                             break
 
                 await browser.close()
 
         except Exception as e:
             _log(f"錯誤: {e}\n{_tb.format_exc()}")
+            if browser:
+                try:
+                    await browser.close()
+                except Exception:
+                    pass
 
         if _listener_running:
             _log(f"{int(reconnect_delay)} 秒後重新連線...")
             await asyncio.sleep(reconnect_delay)
-            reconnect_delay = min(reconnect_delay * 1.5, 120)  # 指數退避，最多 2 分鐘
+            reconnect_delay = min(reconnect_delay * 1.5, 120)
 
 
 def _listener_thread_fn():
