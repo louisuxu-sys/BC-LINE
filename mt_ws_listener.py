@@ -246,6 +246,22 @@ async def _run_listener():
                 if not auth_ok:
                     _log("認證未確認，仍嘗試發送 tables 請求...")
 
+                # 消化所有待處理的 member/statistics 訊息
+                drained = 0
+                while True:
+                    try:
+                        raw = await asyncio.wait_for(ws.recv(), timeout=2)
+                        if isinstance(raw, tuple): raw = raw[0]
+                        if isinstance(raw, bytes): raw = raw.decode("utf-8", errors="replace")
+                        drained += 1
+                    except asyncio.TimeoutError:
+                        break
+                if drained:
+                    _log(f"已消化 {drained} 條待處理訊息")
+
+                # 延遲確保伺服器準備好
+                await asyncio.sleep(2)
+
                 # ---- Step4: 請求桌台資料（所有廳）----
                 for room_id in [1, 2, 3]:
                     tables_msg = {
@@ -256,6 +272,7 @@ async def _run_listener():
                         }
                     }
                     await ws.send(json.dumps(tables_msg))
+                    await asyncio.sleep(0.5)
                 _log("Step4: 已發送 tables 請求 (room 1,2,3)")
 
                 # 也請求龍虎
@@ -273,8 +290,9 @@ async def _run_listener():
                 reconnect_delay = 10
                 last_ping = time.time()
                 msg_count = 0
+                seen_actions = set()
 
-                # ---- Step4: 持續監聽 ----
+                # ---- Step5: 持續監聽 ----
                 while _listener_running:
                     try:
                         raw = await asyncio.wait_for(ws.recv(), timeout=60)
@@ -284,7 +302,7 @@ async def _run_listener():
                             try:
                                 await ws.send(json.dumps({"action": "/ping"}))
                                 last_ping = time.time()
-                                _log("sent ping")
+                                _log(f"sent ping (total msgs={msg_count}, actions={seen_actions})")
                             except Exception:
                                 _log("ping 失敗，重新連線")
                                 break
@@ -303,14 +321,20 @@ async def _run_listener():
                     try:
                         data = json.loads(msg_text)
                     except (json.JSONDecodeError, TypeError):
-                        if msg_count <= 50:
+                        if msg_count <= 5:
                             _log(f"MSG#{msg_count} JSON解析失敗: {str(msg_text)[:200]}")
                         continue
 
-                    # 前 50 條訊息記錄 action 結構（診斷用）
                     action = data.get("action", "")
-                    if msg_count <= 50:
-                        _log(f"MSG#{msg_count} action={json.dumps(action, ensure_ascii=False)[:120]} keys={list(data.keys())}")
+                    if isinstance(action, dict):
+                        aname = action.get("name", "")
+                    else:
+                        aname = str(action)
+
+                    # 記錄新出現的 action 類型
+                    if aname not in seen_actions:
+                        seen_actions.add(aname)
+                        _log(f"NEW_ACTION: {aname} keys={list(data.keys())} msg_preview={str(data.get('msg',''))[:300]}")
 
                     if isinstance(action, dict):
                         name = action.get("name", "")
