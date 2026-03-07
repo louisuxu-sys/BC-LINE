@@ -259,32 +259,52 @@ async def _run_listener():
                 if drained:
                     _log(f"已消化 {drained} 條待處理訊息")
 
-                # 延遲確保伺服器準備好
                 await asyncio.sleep(2)
 
-                # ---- Step4: 請求桌台資料（所有廳）----
-                for room_id in [1, 2, 3]:
-                    tables_msg = {
-                        "method": "GET",
-                        "action": {
-                            "name": "/api/v1/gametype/*/game/*/room/*/tables",
-                            "data": {"gametype_id": 3, "game_id": 1, "room_id": room_id}
-                        }
-                    }
-                    await ws.send(json.dumps(tables_msg))
-                    await asyncio.sleep(0.5)
-                _log("Step4: 已發送 tables 請求 (room 1,2,3)")
+                # ---- Step4: 嘗試多種訂閱/請求格式 ----
+                subscribe_requests = [
+                    ("lobby_join", {"method": "POST", "action": {"name": "/api/v1/lobby/join"}, "body": {}}),
+                    ("room_enter", {"method": "POST", "action": {"name": "/api/v1/room/enter"}, "body": {"room_id": 1, "gametype_id": 3, "game_id": 1}}),
+                    ("subscribe", {"method": "POST", "action": {"name": "/api/v1/subscribe"}, "body": {"type": "all"}}),
+                    ("tables_v1", {"method": "GET", "action": {"name": "/api/v1/gametype/*/game/*/room/*/tables", "data": {"gametype_id": 3, "game_id": 1, "room_id": 1}}}),
+                    ("tables_v2", {"action": "/api/v1/gametype/3/game/1/room/1/tables"}),
+                    ("tables_v3", {"method": "GET", "action": "/api/v1/tables"}),
+                    ("room_sub", {"method": "POST", "action": {"name": "/api/v1/gametype/3/game/1/room/1/subscribe"}}),
+                    ("tables_v4", {"method": "GET", "action": {"name": "/api/v1/gametype/3/game/1/room/1/tables"}}),
+                ]
+                for label, req in subscribe_requests:
+                    await ws.send(json.dumps(req))
+                    _log(f"Step4 sent: {label}")
+                    await asyncio.sleep(0.3)
 
-                # 也請求龍虎
-                dt_msg = {
-                    "method": "GET",
-                    "action": {
-                        "name": "/api/v1/gametype/*/game/*/room/*/tables",
-                        "data": {"gametype_id": 3, "game_id": 2, "room_id": 1}
-                    }
-                }
-                await ws.send(json.dumps(dt_msg))
-                _log("Step4: 已發送龍虎 tables 請求")
+                # 讀取所有回應（10 秒內），看哪個格式有效
+                _log("Step4: 等待 tables 回應 (10s)...")
+                resp_count = 0
+                found_tables = False
+                t0 = time.time()
+                while time.time() - t0 < 10:
+                    try:
+                        raw = await asyncio.wait_for(ws.recv(), timeout=3)
+                        if isinstance(raw, tuple): raw = raw[0]
+                        if isinstance(raw, bytes): raw = raw.decode("utf-8", errors="replace")
+                        data = json.loads(raw)
+                        action = data.get("action", "")
+                        aname = action.get("name", "") if isinstance(action, dict) else str(action)
+                        resp_count += 1
+                        if "member/statistics" not in aname:
+                            _log(f"Step4 RESP: action={aname} keys={list(data.keys())} msg={str(data.get('msg',''))[:300]}")
+                            # 嘗試解析 tables
+                            msg = data.get("msg", {})
+                            if isinstance(msg, dict):
+                                for key in ["tables", "data", "rooms", "list"]:
+                                    if key in msg:
+                                        _log(f"  Found '{key}' in msg: {str(msg[key])[:300]}")
+                                        found_tables = True
+                    except asyncio.TimeoutError:
+                        continue
+                    except Exception:
+                        continue
+                _log(f"Step4 完成: {resp_count} 條回應, tables_found={found_tables}")
 
                 _log("✅ WS 已連線，開始監聽即時開牌")
                 reconnect_delay = 10
