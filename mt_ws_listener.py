@@ -167,28 +167,29 @@ async def _run_listener():
         _log(f"PLAYWRIGHT_BROWSERS_PATH={_os.environ.get('PLAYWRIGHT_BROWSERS_PATH', 'NOT SET')}")
         from playwright.async_api import async_playwright
         _log("playwright import OK")
-        from mt_token import get_mt_token
+        from mt_token import get_mt_token_and_lobby
         _log("mt_token import OK")
     except Exception as e:
         _log(f"import 失敗: {e}\n{_tb.format_exc()}")
         return
 
+    import os as _os
+    platform_url = _os.getenv("GR_PLATFORM_URL", "https://seofufan.seogrwin1688.com/").rstrip("/")
     reconnect_delay = 10
 
     while _listener_running:
         browser = None
         try:
-            # ---- Step1: HTTP API 取 token（不需 Playwright）----
+            # ---- Step1: HTTP API 取 token + lobbyURL ----
             _log("Step1: 取得 MT token (HTTP)...")
-            token = await get_mt_token()
+            token, lobby_url = await get_mt_token_and_lobby()
             if not token:
                 _log("token 為空，重試")
                 await asyncio.sleep(reconnect_delay)
                 continue
-            _log(f"Step1 OK: token={token[:16]}...")
+            _log(f"Step1 OK: token={token[:16]}..., lobbyURL={lobby_url[:60]}")
 
-            # ---- Step2: Playwright 開 MT 遊戲頁面 ----
-            mt_url = f"https://gs1.ofalive99.net/?token={token}&lang=zhtw"
+            # ---- Step2: Playwright 開 MT 遊戲頁面（帶 Referer/Origin）----
             _log("Step2: 啟動 Playwright 開 MT 遊戲頁面...")
 
             async with async_playwright() as pw:
@@ -197,12 +198,17 @@ async def _run_listener():
                     args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"]
                 )
                 _log("Step2a: browser launched")
-                page = await browser.new_page(
+                context = await browser.new_context(
                     viewport={"width": 1280, "height": 800},
                     user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                               "Chrome/125.0.0.0 Safari/537.36"
+                               "Chrome/125.0.0.0 Safari/537.36",
+                    extra_http_headers={
+                        "Referer": f"{platform_url}/",
+                        "Origin": platform_url,
+                    }
                 )
+                page = await context.new_page()
 
                 # 先綁定 WS 監聽，再 goto
                 ws_connected = asyncio.Event()
@@ -242,9 +248,9 @@ async def _run_listener():
 
                 page.on("websocket", on_ws)
 
-                # goto MT 遊戲頁面
-                _log(f"Step3: goto {mt_url[:60]}...")
-                await page.goto(mt_url, wait_until="domcontentloaded", timeout=60000)
+                # goto MT 遊戲頁面（用完整 lobbyURL）
+                _log(f"Step3: goto {lobby_url[:60]}...")
+                await page.goto(lobby_url, wait_until="domcontentloaded", timeout=60000)
                 _log(f"Step3 OK: URL={page.url[:80]}")
 
                 # ---- Step4: 等待 WS 連線 ----

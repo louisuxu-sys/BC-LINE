@@ -90,8 +90,8 @@ async def _fetch_mt_token_http():
         raise RuntimeError(f"回應中找不到 token, lobbyURL={lobby_url}")
 
     token = m.group(1)
-    logger.info("[HTTP] MT Token 取得成功: %s...", token[:8])
-    return token
+    logger.info("[HTTP] MT Token 取得成功: %s..., lobbyURL=%s", token[:8], lobby_url[:60])
+    return token, lobby_url
 
 async def _dismiss_popups(page, stage=""):
     """關閉平台公告彈窗（最新公告 1/3, 2/3, 3/3 等）"""
@@ -580,28 +580,40 @@ async def fetch_mt_token_with_session():
     return pw, browser, context, token
 
 
-async def get_mt_token(force_refresh=False):
-    """取得 MT Token（帶快取）。優先用 HTTP API，失敗時 fallback 到 Playwright"""
-    global _cached_token, _token_expiry
+_cached_lobby_url = None
 
-    if not force_refresh and _cached_token and time.time() < _token_expiry:
+
+async def get_mt_token_and_lobby(force_refresh=False):
+    """取得 MT Token + lobbyURL（帶快取）。優先用 HTTP API"""
+    global _cached_token, _token_expiry, _cached_lobby_url
+
+    if not force_refresh and _cached_token and _cached_lobby_url and time.time() < _token_expiry:
         logger.info("使用快取 MT Token: %s...", _cached_token[:8])
-        return _cached_token
+        return _cached_token, _cached_lobby_url
 
     # 優先嘗試 HTTP API（快速、不需 Playwright）
     try:
         logger.info("嘗試 HTTP API 取得 MT Token...")
-        token = await _fetch_mt_token_http()
+        token, lobby_url = await _fetch_mt_token_http()
         _cached_token = token
+        _cached_lobby_url = lobby_url
         _token_expiry = time.time() + TOKEN_TTL
-        return token
+        return token, lobby_url
     except Exception as e:
         logger.warning("HTTP API 取 token 失敗: %s，嘗試 Playwright...", e)
 
-    # Fallback: Playwright
+    # Fallback: Playwright（無 lobbyURL，自己組）
     token = await _fetch_mt_token_playwright()
+    lobby_url = f"https://gs1.ofalive99.net/?token={token}&lang=zhtw"
     _cached_token = token
+    _cached_lobby_url = lobby_url
     _token_expiry = time.time() + TOKEN_TTL
+    return token, lobby_url
+
+
+async def get_mt_token(force_refresh=False):
+    """取得 MT Token（帶快取）。優先用 HTTP API，失敗時 fallback 到 Playwright"""
+    token, _ = await get_mt_token_and_lobby(force_refresh)
     return token
 
 
