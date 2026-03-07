@@ -3,3 +3,18 @@ __pycache__/
 .env
 user_data.json
 time_cards.json
+
+# Debug & test files
+debug_*.png
+live-*.png
+ws_capture.txt
+mt_ws_test.py
+mt_ws_output.txt
+test_*.py
+
+# Docker (not used - using Python runtime + start.sh)
+Dockerfile
+.dockerignore
+
+# Deprecated modules
+mt_rooms.py
