@@ -14,7 +14,17 @@ from collections import Counter
 
 app = Flask(__name__)
 
-# --- MT 即時牌路追蹤 + 房間數據（全部從 Listener 取，不再用 mt_rooms.py 的 Playwright）---
+# --- 啟動診斷 ---
+print("[BOOT] sv94.py 模組載入中...", flush=True)
+try:
+    import curl_cffi
+    print(f"[BOOT] curl_cffi 版本: {curl_cffi.__version__}", flush=True)
+except ImportError as e:
+    print(f"[BOOT] ⚠️ curl_cffi 無法 import: {e}", flush=True)
+except Exception as e:
+    print(f"[BOOT] curl_cffi 檢查異常: {e}", flush=True)
+
+# --- MT 即時牌路追蹤 + 房間數據 ---
 from mt_ws_listener import (
     start_listener as _start_mt_listener,
     get_table_history, get_table_info, is_listener_running,
@@ -1586,12 +1596,15 @@ time_cards_data = load_data(TIME_CARDS_FILE, {"active_cards": {}, "used_cards": 
 # 延遲啟動 MT 監聽器（讓 gunicorn worker 先完成啟動，避免被 SIGTERM）
 def _delayed_listener_start():
     import time as _t
-    _t.sleep(10)  # 等 10 秒讓 worker 就緒
+    print("[MT] 延遲啟動計時開始 (10s)...", flush=True)
+    _t.sleep(10)
+    print("[MT] 延遲結束，準備啟動監聽器...", flush=True)
     try:
         _ensure_mt_listener()
         print("[MT] 即時牌路監聽器已延遲啟動", flush=True)
     except Exception as e:
-        print(f"[MT] 監聽器啟動失敗（將在用戶觸發時重試）: {e}", flush=True)
+        import traceback as _tb2
+        print(f"[MT] 監聯器啟動失敗: {e}\n{_tb2.format_exc()}", flush=True)
 
 threading.Thread(target=_delayed_listener_start, daemon=True).start()
 
