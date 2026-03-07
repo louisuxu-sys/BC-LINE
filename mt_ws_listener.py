@@ -1,7 +1,8 @@
 """
 MT真人 即時牌路追蹤模組
-長駐 Playwright 頁面，監聽 WebSocket show_win 事件，
+用 curl_cffi 純 WebSocket 連接 MT 遊戲伺服器，
 自動累積每桌牌路歷史，供 LINE Bot 直接查詢。
+（不需要 Playwright / 瀏覽器）
 """
 
 import asyncio
@@ -157,156 +158,125 @@ def _log(msg):
 
 
 async def _run_listener():
-    """主監聽迴圈：HTTP 取 token → Playwright 開 MT 遊戲頁面 → 監聽 WS"""
+    """主監聽迴圈：HTTP 取 token → curl_cffi 純 WS 連接 MT 伺服器"""
     global _listener_running
     _log("_run_listener 開始執行")
 
     try:
-        import os as _os
-        _os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", "/opt/render/.cache/pw-browsers")
-        _log(f"PLAYWRIGHT_BROWSERS_PATH={_os.environ.get('PLAYWRIGHT_BROWSERS_PATH', 'NOT SET')}")
-        from playwright.async_api import async_playwright
-        _log("playwright import OK")
-        from mt_token import get_mt_token_and_lobby
+        from curl_cffi.requests import AsyncSession
+        _log("curl_cffi import OK")
+        from mt_token import get_mt_token
         _log("mt_token import OK")
     except Exception as e:
         _log(f"import 失敗: {e}\n{_tb.format_exc()}")
         return
 
-    import os as _os
-    platform_url = _os.getenv("GR_PLATFORM_URL", "https://seofufan.seogrwin1688.com/").rstrip("/")
+    WS_URL = "wss://a1.ofalive99.net/game/ws"
     reconnect_delay = 10
 
     while _listener_running:
-        browser = None
         try:
-            # ---- Step1: HTTP API 取 token + lobbyURL ----
+            # ---- Step1: HTTP API 取 token ----
             _log("Step1: 取得 MT token (HTTP)...")
-            token, lobby_url = await get_mt_token_and_lobby()
+            token = await get_mt_token()
             if not token:
                 _log("token 為空，重試")
                 await asyncio.sleep(reconnect_delay)
                 continue
-            _log(f"Step1 OK: token={token[:16]}..., lobbyURL={lobby_url[:60]}")
+            _log(f"Step1 OK: token={token[:16]}...")
 
-            # ---- Step2: Playwright 開 MT 遊戲頁面（帶 Referer/Origin）----
-            _log("Step2: 啟動 Playwright 開 MT 遊戲頁面...")
+            # ---- Step2: curl_cffi WS 連線（模擬 Chrome TLS）----
+            _log(f"Step2: WS 連線 {WS_URL}...")
 
-            async with async_playwright() as pw:
-                browser = await pw.chromium.launch(
-                    headless=True,
-                    args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"]
-                )
-                _log("Step2a: browser launched")
-                context = await browser.new_context(
-                    viewport={"width": 1280, "height": 800},
-                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                               "AppleWebKit/537.36 (KHTML, like Gecko) "
-                               "Chrome/125.0.0.0 Safari/537.36",
-                    extra_http_headers={
-                        "Referer": f"{platform_url}/",
-                        "Origin": platform_url,
+            async with AsyncSession(impersonate="chrome") as session:
+                ws = await session.ws_connect(
+                    WS_URL,
+                    headers={
+                        "Origin": "https://gs1.ofalive99.net",
+                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                                      "AppleWebKit/537.36 (KHTML, like Gecko) "
+                                      "Chrome/125.0.0.0 Safari/537.36",
                     }
                 )
-                page = await context.new_page()
+                _log("Step2 OK: WS 已連線")
 
-                # 先綁定 WS 監聽，再 goto
-                ws_connected = asyncio.Event()
-                ws_closed = asyncio.Event()
+                # ---- Step3: 認證 + 請求桌台資料 ----
+                auth_msg = {
+                    "method": "POST",
+                    "action": {"name": "/api/v1/authenticate"},
+                    "body": {"type": 3, "token": token}
+                }
+                await ws.send(json.dumps(auth_msg))
+                _log("Step3: 已發送 authenticate")
 
-                def on_ws(ws):
-                    _log(f"WS 偵測到: {ws.url[:80]}")
-                    if "/ws" not in ws.url:
-                        return
-                    _log(f"✅ 目標 WS 已連線: {ws.url[:80]}")
-                    ws_connected.set()
-
-                    def on_frame(payload):
-                        try:
-                            data = json.loads(payload)
-                            action = data.get("action", "")
-                            if isinstance(action, dict):
-                                name = action.get("name", "")
-                                if "show_win" in name:
-                                    _on_show_win(data.get("body", {}))
-                            elif isinstance(action, str) and "tables" in action:
-                                msg = data.get("msg", {})
-                                tables = msg.get("tables", [])
-                                if isinstance(tables, dict):
-                                    tables = tables.get("tables", [])
-                                if tables:
-                                    _on_tables_response(tables)
-                        except Exception:
-                            pass
-
-                    def on_close():
-                        _log("WS 已斷開")
-                        ws_closed.set()
-
-                    ws.on("framereceived", on_frame)
-                    ws.on("close", on_close)
-
-                page.on("websocket", on_ws)
-
-                # 捕獲 JS console 錯誤
-                def on_console(msg):
-                    if msg.type in ("error", "warning"):
-                        _log(f"[JS {msg.type}] {msg.text[:150]}")
-                page.on("console", on_console)
-
-                def on_page_error(err):
-                    _log(f"[PAGE ERROR] {str(err)[:150]}")
-                page.on("pageerror", on_page_error)
-
-                # goto MT 遊戲頁面（用完整 lobbyURL）
-                _log(f"Step3: goto {lobby_url[:60]}...")
-                await page.goto(lobby_url, wait_until="domcontentloaded", timeout=60000)
-                title = await page.title()
-                _log(f"Step3 OK: URL={page.url[:80]}, title={title}")
-
-                # 檢查是否被封鎖
-                if "受限" in title or "403" in title or "限制" in title:
-                    _log("⚠️ 頁面被封鎖（403），token 可能過期，強制刷新...")
-                    from mt_token import get_mt_token_and_lobby as _refresh
-                    token, lobby_url = await _refresh(force_refresh=True)
-                    _log(f"新 token={token[:16]}..., 重新 goto...")
-                    await page.goto(lobby_url, wait_until="domcontentloaded", timeout=60000)
-                    title = await page.title()
-                    _log(f"重新 goto: title={title}")
-
-                # ---- Step4: 等待 WS 連線 ----
-                _log("Step4: 等待 WS 連線...")
-                try:
-                    await asyncio.wait_for(ws_connected.wait(), timeout=45)
-                except asyncio.TimeoutError:
-                    title2 = await page.title()
-                    _log(f"WS 45s 超時，title={title2}, URL={page.url[:80]}")
-                    await browser.close()
-                    continue
+                # 請求桌台資料（百家樂 room_id=1）
+                tables_msg = {
+                    "method": "GET",
+                    "action": {
+                        "name": "/api/v1/gametype/*/game/*/room/*/tables",
+                        "data": {"gametype_id": 3, "game_id": 1, "room_id": 1}
+                    }
+                }
+                await ws.send(json.dumps(tables_msg))
+                _log("Step3: 已發送 tables 請求")
 
                 _log("✅ WS 已連線，開始監聽即時開牌")
                 reconnect_delay = 10
+                last_ping = time.time()
 
-                # ---- 保持運行直到 WS 斷開 ----
-                while _listener_running and not ws_closed.is_set():
+                # ---- Step4: 持續監聽 ----
+                while _listener_running:
                     try:
-                        await asyncio.wait_for(ws_closed.wait(), timeout=300)
+                        raw = await asyncio.wait_for(ws.recv(), timeout=60)
                     except asyncio.TimeoutError:
-                        try:
-                            await page.evaluate("1+1")
-                        except Exception:
-                            _log("頁面已失效，重新連線")
-                            break
+                        # 60 秒沒訊息，發 ping 保活
+                        if time.time() - last_ping > 55:
+                            try:
+                                await ws.send(json.dumps({"action": "/ping"}))
+                                last_ping = time.time()
+                            except Exception:
+                                _log("ping 失敗，重新連線")
+                                break
+                        continue
 
-                await browser.close()
+                    # curl_cffi 可能返回 tuple (msg, type)
+                    if isinstance(raw, tuple):
+                        msg_text = raw[0]
+                    else:
+                        msg_text = raw
+                    if isinstance(msg_text, bytes):
+                        msg_text = msg_text.decode("utf-8", errors="replace")
+
+                    try:
+                        data = json.loads(msg_text)
+                    except (json.JSONDecodeError, TypeError):
+                        continue
+
+                    action = data.get("action", "")
+                    if isinstance(action, dict):
+                        name = action.get("name", "")
+                        # show_win 事件
+                        if "show_win" in name:
+                            _on_show_win(data.get("body", {}))
+                        # tables 回應
+                        elif "tables" in name:
+                            msg_data = data.get("msg", {})
+                            tables = msg_data.get("tables", [])
+                            if isinstance(tables, dict):
+                                tables = tables.get("tables", [])
+                            if tables:
+                                _on_tables_response(tables)
+                    elif isinstance(action, str):
+                        if "tables" in action:
+                            msg_data = data.get("msg", {})
+                            tables = msg_data.get("tables", [])
+                            if isinstance(tables, dict):
+                                tables = tables.get("tables", [])
+                            if tables:
+                                _on_tables_response(tables)
 
         except Exception as e:
             _log(f"錯誤: {e}\n{_tb.format_exc()}")
-            if browser:
-                try:
-                    await browser.close()
-                except Exception:
-                    pass
 
         if _listener_running:
             _log(f"{int(reconnect_delay)} 秒後重新連線...")
