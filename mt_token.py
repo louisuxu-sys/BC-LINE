@@ -343,6 +343,166 @@ async def _fetch_mt_token_playwright():
     return token
 
 
+async def fetch_mt_token_with_session():
+    """取得 MT Token 並返回 Playwright session（不關閉 browser），供 Listener 複用。
+    Returns: (pw_instance, browser, context, token)
+    呼叫方負責關閉 browser。
+    """
+    os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", "/opt/render/.cache/pw-browsers")
+    from playwright.async_api import async_playwright
+
+    platform_url = os.getenv("GR_PLATFORM_URL", "https://seofufan.seogrwin1688.com/")
+    username = os.getenv("GR_USERNAME", "")
+    password = os.getenv("GR_PASSWORD", "")
+    if not username or not password:
+        raise RuntimeError("GR_USERNAME / GR_PASSWORD 未設定")
+
+    pw = await async_playwright().start()
+    browser = await pw.chromium.launch(
+        headless=True,
+        args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"]
+    )
+    context = await browser.new_context(
+        viewport={"width": 1280, "height": 800},
+        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                   "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+    )
+    page = await context.new_page()
+
+    # 登入
+    await page.goto(platform_url, wait_until="networkidle", timeout=30000)
+    await page.wait_for_timeout(2000)
+    await _dismiss_popups(page, "登入前")
+
+    account_sel = None
+    for sel in ['input[placeholder*="帳號"]', 'input[placeholder*="账号"]',
+                'input[placeholder*="account"]', 'input[placeholder*="Account"]',
+                'input[name="account"]', 'input[type="text"]:first-of-type']:
+        if await page.query_selector(sel):
+            account_sel = sel
+            break
+    pwd_sel = None
+    for sel in ['input[placeholder*="密碼"]', 'input[placeholder*="密码"]',
+                'input[placeholder*="password"]', 'input[placeholder*="Password"]',
+                'input[name="password"]', 'input[type="password"]']:
+        if await page.query_selector(sel):
+            pwd_sel = sel
+            break
+    if not account_sel or not pwd_sel:
+        await browser.close()
+        await pw.stop()
+        raise RuntimeError("找不到帳號或密碼輸入框")
+
+    await page.fill(account_sel, username)
+    await page.fill(pwd_sel, password)
+    await page.wait_for_timeout(500)
+
+    login_btn = None
+    for sel in ['button:has-text("登入")', 'button:has-text("登录")',
+                'button:has-text("Sign In")', 'button:has-text("LOGIN")',
+                'button[type="submit"]']:
+        if await page.query_selector(sel):
+            login_btn = sel
+            break
+    if not login_btn:
+        await browser.close()
+        await pw.stop()
+        raise RuntimeError("找不到登入按鈕")
+
+    btn_el = await page.query_selector(login_btn)
+    if btn_el:
+        await btn_el.evaluate("el => el.click()")
+    else:
+        await page.click(login_btn)
+    await page.wait_for_timeout(5000)
+    await _dismiss_popups(page, "登入後")
+
+    # 攔截 token
+    token_future = asyncio.get_event_loop().create_future()
+
+    async def on_response(response):
+        try:
+            url = response.url
+            if any(k in url.lower() for k in ["game", "launch", "login"]):
+                if response.status == 200:
+                    try:
+                        body = await response.text()
+                        m = re.search(r'token=([a-fA-F0-9]{32})', body)
+                        if m and not token_future.done():
+                            token_future.set_result(m.group(1))
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+    page.on("response", on_response)
+
+    def on_new_page(new_page):
+        async def _extract():
+            try:
+                await new_page.wait_for_load_state("domcontentloaded", timeout=15000)
+                m = re.search(r'[?&]token=([a-fA-F0-9]{32})', new_page.url)
+                if m and not token_future.done():
+                    token_future.set_result(m.group(1))
+            except Exception:
+                pass
+        asyncio.ensure_future(_extract())
+    context.on("page", on_new_page)
+
+    # 點擊真人視訊
+    try:
+        clicked = await page.evaluate('''() => {
+            const els = document.querySelectorAll('a, div, span');
+            for (const el of els) {
+                if (el.textContent.trim() === '真人視訊' || el.textContent.trim() === '真人视讯') {
+                    el.click(); return true;
+                }
+            }
+            return false;
+        }''')
+    except Exception:
+        pass
+    await page.wait_for_timeout(3000)
+
+    # 點擊 MT真人
+    mt_clicked = await page.evaluate('''() => {
+        const els = document.querySelectorAll('div, span, a, button, img');
+        let best = null;
+        for (const el of els) {
+            const text = (el.textContent || el.alt || '');
+            if (text.includes('MT真人') || text.includes('MT 真人')) {
+                if (!best || el.textContent.length < best.textContent.length) best = el;
+            }
+        }
+        if (best) { best.click(); return true; }
+        return false;
+    }''')
+    if not mt_clicked:
+        await browser.close()
+        await pw.stop()
+        raise RuntimeError("找不到 MT真人 按鈕")
+
+    await page.wait_for_timeout(3000)
+
+    # 等待 token
+    token = None
+    try:
+        token = await asyncio.wait_for(token_future, timeout=25)
+    except (asyncio.TimeoutError, TimeoutError):
+        for p2 in context.pages:
+            m = re.search(r'[?&]token=([a-fA-F0-9]{32})', p2.url)
+            if m:
+                token = m.group(1)
+                break
+
+    if not token:
+        await browser.close()
+        await pw.stop()
+        raise RuntimeError("無法取得 MT Token（超時）")
+
+    return pw, browser, context, token
+
+
 async def get_mt_token(force_refresh=False):
     """取得 MT Token（帶快取）"""
     global _cached_token, _token_expiry
