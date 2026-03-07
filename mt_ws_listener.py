@@ -210,6 +210,7 @@ async def _run_listener():
                 _log("Step3: 已發送 authenticate")
 
                 # 等待認證回應（最多讀 10 條訊息）
+                # 伺服器可能不回 authenticate action，而是直接推送 member/statistics
                 auth_ok = False
                 for _i in range(10):
                     try:
@@ -219,21 +220,27 @@ async def _run_listener():
                         data = json.loads(raw)
                         action = data.get("action", "")
                         aname = action.get("name", "") if isinstance(action, dict) else str(action)
-                        _log(f"AUTH_WAIT#{_i}: action={aname[:80]} err={data.get('err','')}")
+                        err = data.get("err", "")
+                        _log(f"AUTH_WAIT#{_i}: action={aname[:80]} err={err} msg_preview={str(data.get('msg',''))[:200]}")
                         if "authenticate" in aname:
-                            err = data.get("err", "")
                             if err:
                                 _log(f"認證失敗: {err}，重新取 token...")
                                 from mt_token import get_mt_token as _refresh_token
                                 token = await _refresh_token(force_refresh=True)
                                 break
                             auth_ok = True
-                            _log("✅ 認證成功")
+                            _log("✅ 認證成功 (explicit)")
+                            break
+                        elif "member" in aname:
+                            # member/statistics = 伺服器認證後推送的用戶資料
+                            auth_ok = True
+                            _log("✅ 認證成功 (implicit: member/statistics received)")
                             break
                     except asyncio.TimeoutError:
                         _log("等待認證回應超時")
                         break
-                    except Exception:
+                    except Exception as ex:
+                        _log(f"AUTH_WAIT#{_i} 異常: {ex}")
                         continue
 
                 if not auth_ok:
