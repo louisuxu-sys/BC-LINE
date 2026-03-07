@@ -151,31 +151,45 @@ def _decode_bead_plate(bead_str):
     return history
 
 
+def _log(msg):
+    """Listener 專用日誌（確保在 gunicorn 背景執行緒中也能輸出）"""
+    print(f"[Listener] {msg}", flush=True)
+
+
 async def _run_listener():
-    """主監聽迴圈：開啟 MT 頁面，長駐監聯 WS 事件"""
+    """主監聽迴圈：開啟 MT 頁面，長駐監聽 WS 事件"""
     global _listener_running
-    import os as _os
-    _os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", "/opt/render/.cache/pw-browsers")
-    from playwright.async_api import async_playwright
-    from mt_token import get_mt_token
+    _log("_run_listener 開始執行")
+
+    try:
+        import os as _os
+        _os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", "/opt/render/.cache/pw-browsers")
+        _log(f"PLAYWRIGHT_BROWSERS_PATH={_os.environ.get('PLAYWRIGHT_BROWSERS_PATH', 'NOT SET')}")
+        from playwright.async_api import async_playwright
+        _log("playwright import OK")
+        from mt_token import get_mt_token
+        _log("mt_token import OK")
+    except Exception as e:
+        _log(f"import 失敗: {e}\n{_tb.format_exc()}")
+        return
 
     reconnect_delay = 10  # 秒
 
     while _listener_running:
         try:
-            logger.info("[Listener] Step1: 取得 MT token...")
+            _log("Step1: 取得 MT token...")
             token = await get_mt_token()
-            logger.info("[Listener] Step1 OK: token=%s...", token[:20] if token else "None")
+            _log(f"Step1 OK: token={token[:20] if token else 'None'}...")
             mt_url = f"https://gsa.ofalive99.net/?token={token}&lang=zhtw"
-            logger.info("[Listener] Step2: 啟動 Playwright...")
+            _log("Step2: 啟動 Playwright...")
 
             async with async_playwright() as p:
-                logger.info("[Listener] Step2a: launching chromium...")
+                _log("Step2a: launching chromium...")
                 browser = await p.chromium.launch(
                     headless=True,
                     args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"]
                 )
-                logger.info("[Listener] Step2b: browser launched OK")
+                _log("Step2b: browser launched OK")
                 context = await browser.new_context(
                     viewport={"width": 1280, "height": 800},
                     user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -223,20 +237,20 @@ async def _run_listener():
 
                 page.on("websocket", on_ws)
 
+                _log(f"Step3: goto {mt_url[:60]}...")
                 await page.goto(mt_url, wait_until="domcontentloaded", timeout=60000)
-                logger.info("[Listener] MT 頁面載入完成")
-                # 額外等待讓 JS 啟動 WS
+                _log("Step3 OK: 頁面載入完成")
                 await asyncio.sleep(5)
 
                 # 等待 WS 連線
                 try:
                     await asyncio.wait_for(ws_connected.wait(), timeout=30)
                 except asyncio.TimeoutError:
-                    logger.warning("[Listener] 等待 WS 連線超時，重試...")
+                    _log("等待 WS 連線超時 30s，重試...")
                     await browser.close()
                     continue
 
-                logger.info("[Listener] 開始監聽即時開牌事件...")
+                _log("✅ WS 已連線，開始監聽即時開牌事件")
 
                 # 持續運行直到 WS 斷開或停止信號
                 # 每 5 分鐘 ping 一下頁面防止休眠
@@ -255,24 +269,26 @@ async def _run_listener():
                 await browser.close()
 
         except Exception as e:
-            logger.error("[Listener] 錯誤: %s\n%s", e, _tb.format_exc())
+            _log(f"錯誤: {e}\n{_tb.format_exc()}")
 
         if _listener_running:
-            logger.info("[Listener] %d 秒後重新連線...", reconnect_delay)
+            _log(f"{int(reconnect_delay)} 秒後重新連線...")
             await asyncio.sleep(reconnect_delay)
             reconnect_delay = min(reconnect_delay * 1.5, 120)  # 指數退避，最多 2 分鐘
 
 
 def _listener_thread_fn():
     """執行緒入口"""
+    _log("thread started")
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
         loop.run_until_complete(_run_listener())
     except Exception as e:
-        logger.error("[Listener] 執行緒異常退出: %s", e)
+        _log(f"執行緒異常退出: {e}\n{_tb.format_exc()}")
     finally:
         loop.close()
+        _log("thread ended")
 
 
 def start_listener():
