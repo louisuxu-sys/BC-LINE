@@ -1247,9 +1247,10 @@ def webhook():
 
             # ── 靜態房間列表 ──
             if category == "亞洲廳":
+                hint = [{"type": "text", "text": "💡 可直接輸入房號，如：百家樂5", "size": "xxs", "color": "#888888", "align": "center", "wrap": True, "margin": "none"}]
                 row1 = [{"type": "button", "action": {"type": "message", "label": f"百家樂{i}", "text": f"百家樂{i}"}, "style": "primary", "color": "#2E86C1", "height": "sm"} for i in range(1, 6)]
                 row2 = [{"type": "button", "action": {"type": "message", "label": f"百家樂{i}", "text": f"百家樂{i}"}, "style": "primary", "color": "#2E86C1", "height": "sm"} for i in range(6, 14)]
-                body_items = row1 + row2 + [
+                body_items = hint + row1 + row2 + [
                     {"type": "button", "action": {"type": "message", "label": "百家樂3A", "text": "百家樂3A"}, "style": "secondary", "height": "sm"},
                     {"type": "button", "action": {"type": "message", "label": "↩ 返回主選單", "text": "返回主選單"}, "style": "secondary", "height": "sm"}
                 ]
